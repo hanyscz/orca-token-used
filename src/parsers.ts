@@ -33,6 +33,8 @@ export interface SessionTranscriptState {
   lastSizeBytes: number
   lastMtimeMs: number
   cwd: string | null
+  cwdIsHeuristic?: boolean
+  cliCustomTitle: string | null
   titleHint: string | null
   isInternalHelper: boolean
   isSubagent: boolean
@@ -63,6 +65,8 @@ export function createEmptySessionState(
     lastSizeBytes: 0,
     lastMtimeMs: 0,
     cwd: null,
+    cwdIsHeuristic: false,
+    cliCustomTitle: null,
     titleHint: null,
     isInternalHelper: false,
     isSubagent: false,
@@ -277,7 +281,9 @@ export function applyClaudeLines(state: SessionTranscriptState, lines: string[])
       state.cwd = obj.cwd.trim()
     }
     if (typeof obj.customTitle === 'string' && obj.customTitle.trim()) {
-      state.titleHint = obj.customTitle.trim()
+      const renamed = obj.customTitle.trim()
+      state.cliCustomTitle = renamed
+      state.titleHint = renamed
     }
 
     const entryType = obj.type

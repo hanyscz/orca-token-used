@@ -62,7 +62,7 @@ fi
 while IFS= read -r line; do
   path="${line:3}"
   case "$path" in
-    README.md|LICENSE|CHANGELOG.md|orca-plugin.json|tsconfig.json|token-pulse-plan.md|.gitignore|assets/*|docs/*|scripts/*|src/*) ;;
+    README.md|LICENSE|CHANGELOG.md|orca-plugin.json|tsconfig.json|token-pulse-plan.md|*-plan.md|.gitignore|assets/*|docs/*|scripts/*|src/*) ;;
     *)
       echo "Unexpected worktree change: $path" >&2
       echo "Commit or remove it before publishing." >&2

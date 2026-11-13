@@ -2,6 +2,7 @@ import { createRequire } from 'node:module'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { AgentKind } from './protocol'
 
 interface SqliteStatement {
@@ -33,6 +34,8 @@ export interface JournalSessionMeta {
   lastTurnState?: 'open' | 'settled' | null
 }
 
+export type TerminalTabTitleSource = 'custom' | 'generated' | 'label' | null
+
 export interface TerminalTabTitleOverride {
   ptyId: string
   workspacePath: string
@@ -42,16 +45,53 @@ export interface TerminalTabTitleOverride {
   lastFocusedAt: number
 }
 
+export interface TerminalTabMeta {
+  ptyId: string
+  tabId: string
+  workspacePath: string
+  agent: AgentKind | null
+  effectiveTitle: string | null
+  titleSource: TerminalTabTitleSource
+  rawTabLabel: string | null
+  createdAt: number
+  lastFocusedAt: number
+  isOpenInUnifiedTabs: boolean
+}
+
+export interface AntigravityConversationSummaryMeta {
+  conversationId: string
+  title: string | null
+  workspacePath: string | null
+  workspacePaths: string[]
+  isSubagent: boolean
+  updatedAtMs: number
+}
+
+export interface AntigravityHistoryEntry {
+  timestampMs: number
+  workspacePath: string
+  conversationId: string | null
+  displayPreview: string | null
+}
+
 export interface JournalIndex {
   byNativeId: Map<string, JournalSessionMeta>
   byOrcaSessionId: Map<string, JournalSessionMeta>
   accountHomes: Map<AgentKind, Set<string>>
   /** Latest observed live/recent activity timestamp per workspacePath */
   workspaceActivityMs: Map<string, number>
-  /** Custom user-renamed PTY tab titles keyed by ptyId (`<worktreeId>@@<pty>`) */
+  /** Non-generic terminal tab titles keyed by ptyId, tabId, and `pty:<ptyId>` */
   ptyCustomTitles?: Map<string, string>
-  /** Active PTY terminal tabs with user-defined customTitle for matching CLI sessions */
+  /** Active PTY terminal tabs with user-defined/generated title (legacy override shape) */
   terminalTabOverrides?: TerminalTabTitleOverride[]
+  /** All discovered Orca terminal tabs (renamed, generated, and plain) */
+  terminalTabs?: TerminalTabMeta[]
+  /** Authoritative Antigravity workspace paths, titles, and subagent flags from conversation_summaries.db */
+  antigravitySummaries?: Map<string, AntigravityConversationSummaryMeta>
+  /** Explicit conversationId -> workspacePath mappings from history.jsonl */
+  antigravityHistoryByConversationId?: Map<string, string>
+  /** Recent Antigravity CLI prompt history entries for zero-latency turn-1 cwd matching */
+  antigravityHistoryEntries?: AntigravityHistoryEntry[]
   /** Configured default model slugs read from local CLI settings (`agy`, `codex`, `claude`, `gemini`) */
   cliConfiguredModels?: Partial<Record<AgentKind, string>>
 }
@@ -65,8 +105,11 @@ export interface OrcaActiveWorktreeSelection {
 function loadSqliteConstructor(): SqliteDbConstructor | null {
   try {
     const req = createRequire(import.meta.url)
-    const sqliteMod = req('node:sqlite') as { DatabaseSync?: SqliteDbConstructor }
-    return sqliteMod.DatabaseSync ?? null
+    const sqliteMod = req('node:sqlite') as {
+      Database?: SqliteDbConstructor
+      DatabaseSync?: SqliteDbConstructor
+    }
+    return sqliteMod.Database ?? sqliteMod.DatabaseSync ?? null
   } catch {
     return null
   }
@@ -235,7 +278,7 @@ function mapProviderToAgent(provider: unknown): AgentKind | null {
   return null
 }
 
-function inferAgentFromTerminalTitle(rawTitle: unknown): AgentKind | null {
+export function inferAgentFromTerminalTitle(rawTitle: unknown): AgentKind | null {
   if (typeof rawTitle !== 'string') return null
   const t = rawTitle.trim().toLowerCase()
   if (t === 'agy' || t.startsWith('agy ') || t === 'antigravity') return 'antigravity'
@@ -258,6 +301,72 @@ export function cleanConversationTitle(raw: unknown): string | null {
 function isGenericChatTabLabel(label: string | null): boolean {
   if (!label) return true
   return /^(codex|claude|claude code|antigravity|gemini|agent|new)\s+chat$/i.test(label.trim())
+}
+
+/**
+ * Returns true if `raw` is a generic terminal/shell/process placeholder or boilerplate header
+ * rather than a meaningful conversation or user-assigned tab title.
+ */
+export function isGenericTerminalTabLabel(raw: unknown, defaultTitle?: unknown): boolean {
+  const s = cleanConversationTitle(raw)
+  if (!s) return true
+  const def = cleanConversationTitle(defaultTitle)
+  if (def && s.toLowerCase() === def.toLowerCase()) return true
+
+  if (/^terminal(?:\s+\d+)?$/i.test(s)) return true
+  if (
+    /^(agy|antigravity|claude|claude code|codex|openai codex|gemini|gemini cli|zsh|bash|fish|sh|dash|ksh|csh|tcsh|tmux|screen|pwsh|powershell|cmd|cmd\.exe|node|python|python3)$/i.test(
+      s
+    )
+  ) {
+    return true
+  }
+  if (/^(codex|claude|claude code|antigravity|gemini|agent|new)\s+(chat|session|terminal)$/i.test(s)) {
+    return true
+  }
+  if (
+    s === '~' ||
+    s.startsWith('~/') ||
+    s.startsWith('~\\') ||
+    s.startsWith('/') ||
+    s.startsWith('..') ||
+    /^[A-Za-z]:[\\/]/.test(s)
+  ) {
+    return true
+  }
+  if (/^continue work from the prior orca\b/i.test(s)) return true
+  if (s.includes("Name this chat from the user's first request.") || s.includes('<USER_REQUEST>')) {
+    return true
+  }
+  return false
+}
+
+/**
+ * Sanitizes Orca's `generatedTitle` / `generatedLabel`, rescuing `Session: <name>` if a full
+ * handoff header was captured and rejecting truncated boilerplate like `"Continue work from the prior Orca"`.
+ */
+export function sanitizeTerminalGeneratedTitle(
+  raw: unknown,
+  defaultTitle?: unknown
+): string | null {
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  let s = raw
+  const userReqMatch = s.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/i)
+  if (userReqMatch) {
+    s = userReqMatch[1]
+  }
+  if (/^\s*continue work from the prior orca\b/i.test(s)) {
+    const sessMatch = s.match(/Session:\s*([^\r\n]+)/i)
+    if (sessMatch?.[1]?.trim()) {
+      s = sessMatch[1].trim()
+    } else {
+      return null
+    }
+  }
+  s = s.replace(/<[^>]+>/g, ' ')
+  const cleaned = cleanConversationTitle(s)
+  if (!cleaned || isGenericTerminalTabLabel(cleaned, defaultTitle)) return null
+  return cleaned
 }
 
 /**
@@ -354,19 +463,382 @@ function readLocalCliConfiguredModels(
   return out
 }
 
+function parseJournalTimestampMs(raw: unknown): number {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return raw > 1e12 ? raw : raw * 1000
+  }
+  if (typeof raw === 'string' && raw.trim()) {
+    const num = Number(raw)
+    if (Number.isFinite(num) && num > 0) {
+      return num > 1e12 ? num : num * 1000
+    }
+    const parsed = Date.parse(raw)
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  return 0
+}
+
+function decodeFileUriOrPath(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const s = raw.trim()
+  if (!s) return null
+  let decoded = s
+  if (s.startsWith('file://')) {
+    try {
+      decoded = fileURLToPath(s)
+    } catch {
+      try {
+        decoded = decodeURIComponent(s.replace(/^file:\/\/(?:localhost)?/i, ''))
+      } catch {
+        decoded = s.replace(/^file:\/\/(?:localhost)?/i, '')
+      }
+    }
+  }
+  const cleaned = decoded.trim().replace(/[\\/]+$/, '')
+  return cleaned.length > 0 ? cleaned : null
+}
+
+function normalizePathForMatch(p: string): string {
+  const trimmed = p.trim().replace(/[\\/]+$/, '')
+  if (!trimmed) return ''
+  try {
+    return fs.realpathSync.native(trimmed)
+  } catch {
+    return path.resolve(trimmed)
+  }
+}
+
+function decodeWorkspaceUris(
+  rawUris: unknown,
+  preferredNormPaths: Set<string>
+): { primary: string | null; all: string[] } {
+  const candidates: string[] = []
+  if (Array.isArray(rawUris)) {
+    for (const item of rawUris) {
+      const dec = decodeFileUriOrPath(item)
+      if (dec && !candidates.includes(dec)) candidates.push(dec)
+    }
+  } else if (typeof rawUris === 'string' && rawUris.trim()) {
+    const trimmed = rawUris.trim()
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            const dec = decodeFileUriOrPath(item)
+            if (dec && !candidates.includes(dec)) candidates.push(dec)
+          }
+        }
+      } catch {
+        // Fall through to regex extraction
+      }
+    }
+    if (candidates.length === 0) {
+      const matches = trimmed.match(/file:\/\/[^\s"',\]]+/g)
+      if (matches) {
+        for (const m of matches) {
+          const dec = decodeFileUriOrPath(m)
+          if (dec && !candidates.includes(dec)) candidates.push(dec)
+        }
+      } else {
+        const single = decodeFileUriOrPath(trimmed)
+        if (single) candidates.push(single)
+      }
+    }
+  }
+
+  if (candidates.length === 0) return { primary: null, all: [] }
+  if (preferredNormPaths.size > 0 && candidates.length > 1) {
+    for (const c of candidates) {
+      const cNorm = normalizePathForMatch(c)
+      for (const pref of preferredNormPaths) {
+        if (cNorm === pref || cNorm.startsWith(pref + path.sep)) {
+          return { primary: c, all: candidates }
+        }
+      }
+    }
+  }
+  return { primary: candidates[0], all: candidates }
+}
+
+function collectAntigravityDataDirs(
+  homeDir: string,
+  orcaDirs: string[],
+  accountHomes: Set<string>
+): string[] {
+  const rawDirs: string[] = [
+    path.join(homeDir, '.gemini', 'antigravity-cli'),
+    path.join(homeDir, '.gemini', 'antigravity')
+  ]
+  for (const orcaDir of orcaDirs) {
+    rawDirs.push(path.join(orcaDir, 'antigravity-chat', 'antigravity-cli'))
+    rawDirs.push(path.join(orcaDir, 'antigravity-chat', 'antigravity-acp'))
+    const agAccs = path.join(orcaDir, 'antigravity-accounts')
+    try {
+      if (fs.existsSync(agAccs)) {
+        for (const ent of fs.readdirSync(agAccs, { withFileTypes: true })) {
+          if (ent.isDirectory()) {
+            rawDirs.push(path.join(agAccs, ent.name))
+            rawDirs.push(path.join(agAccs, ent.name, 'antigravity-cli'))
+            rawDirs.push(path.join(agAccs, ent.name, 'antigravity-acp'))
+          }
+        }
+      }
+    } catch {
+      // Ignore unreadable account dir
+    }
+  }
+  for (const h of accountHomes) {
+    rawDirs.push(h)
+    rawDirs.push(path.join(h, 'antigravity-cli'))
+    rawDirs.push(path.join(h, 'antigravity-acp'))
+  }
+
+  const seenKeys = new Set<string>()
+  const out: string[] = []
+  for (const d of rawDirs) {
+    const key = canonicalDirKey(d)
+    if (!key || seenKeys.has(key)) continue
+    seenKeys.add(key)
+    try {
+      out.push(fs.realpathSync.native(d))
+    } catch {
+      out.push(d)
+    }
+  }
+  return out
+}
+
+function readAntigravityMetadata(
+  agDirs: string[],
+  DatabaseCtor: SqliteDbConstructor | null,
+  preferredNormPaths: Set<string>
+): {
+  summaries: Map<string, AntigravityConversationSummaryMeta>
+  historyByConvId: Map<string, string>
+  historyEntries: AntigravityHistoryEntry[]
+} {
+  const summaries = new Map<string, AntigravityConversationSummaryMeta>()
+  const historyByConvId = new Map<string, string>()
+  const historyEntries: AntigravityHistoryEntry[] = []
+
+  if (DatabaseCtor) {
+    for (const agDir of agDirs) {
+      const dbPath = path.join(agDir, 'conversation_summaries.db')
+      if (!fs.existsSync(dbPath)) continue
+      let db: SqliteReadOnlyDb | null = null
+      try {
+        db = new DatabaseCtor(dbPath, { readOnly: true, timeout: 300 })
+
+        const parentedIds = new Set<string>()
+        try {
+          const pRows = db.prepare('SELECT * FROM conversation_parents').all()
+          for (const pr of pRows) {
+            const childId = pr.conversation_id ?? pr.child_conversation_id ?? pr.child_id
+            const parentId = pr.parent_conversation_id ?? pr.parent_id
+            if (
+              typeof childId === 'string' &&
+              childId.trim() &&
+              typeof parentId === 'string' &&
+              parentId.trim()
+            ) {
+              parentedIds.add(childId.trim())
+            }
+          }
+        } catch {
+          // Optional table
+        }
+
+        const colRows = db.prepare('PRAGMA table_info(conversation_summaries)').all()
+        const availableCols = new Set(
+          colRows
+            .map((c) => (typeof c.name === 'string' ? c.name : ''))
+            .filter((n) => n.length > 0)
+        )
+        if (!availableCols.has('conversation_id')) continue
+
+        const wantedCols = [
+          'conversation_id',
+          'title',
+          'workspace_uris',
+          'last_modified_time',
+          'updated_at',
+          'parent_conversation_id',
+          'nesting_depth'
+        ].filter((c) => availableCols.has(c))
+
+        const sRows = db
+          .prepare(`SELECT ${wantedCols.join(', ')} FROM conversation_summaries`)
+          .all()
+
+        for (const r of sRows) {
+          const convId = typeof r.conversation_id === 'string' ? r.conversation_id.trim() : ''
+          if (!convId) continue
+
+          const cleanTitle = cleanConversationTitle(r.title)
+          const decoded = decodeWorkspaceUris(r.workspace_uris, preferredNormPaths)
+          const rowUpdatedMs = parseJournalTimestampMs(r.last_modified_time ?? r.updated_at)
+          const parentCol =
+            typeof r.parent_conversation_id === 'string' ? r.parent_conversation_id.trim() : ''
+          const depthNum = Number(r.nesting_depth) || 0
+          const rowIsSubagent = parentedIds.has(convId) || parentCol.length > 0 || depthNum > 0
+
+          const existing = summaries.get(convId)
+          if (!existing) {
+            summaries.set(convId, {
+              conversationId: convId,
+              title: cleanTitle,
+              workspacePath: decoded.primary,
+              workspacePaths: decoded.all,
+              isSubagent: rowIsSubagent,
+              updatedAtMs: rowUpdatedMs
+            })
+          } else {
+            const isNewer = rowUpdatedMs >= existing.updatedAtMs
+            const mergedPaths = Array.from(
+              new Set(
+                isNewer
+                  ? [...decoded.all, ...existing.workspacePaths]
+                  : [...existing.workspacePaths, ...decoded.all]
+              )
+            )
+            // Pick preferred path from mergedPaths if neither DB had a preferred primary yet
+            let mergedPrimary = isNewer
+              ? decoded.primary || existing.workspacePath
+              : existing.workspacePath || decoded.primary
+            if (preferredNormPaths.size > 0 && mergedPaths.length > 1) {
+              for (const mp of mergedPaths) {
+                const mpNorm = normalizePathForMatch(mp)
+                if (
+                  Array.from(preferredNormPaths).some(
+                    (pref) => mpNorm === pref || mpNorm.startsWith(pref + path.sep)
+                  )
+                ) {
+                  mergedPrimary = mp
+                  break
+                }
+              }
+            }
+            summaries.set(convId, {
+              conversationId: convId,
+              title: isNewer ? cleanTitle || existing.title : existing.title || cleanTitle,
+              workspacePath: mergedPrimary,
+              workspacePaths: mergedPaths,
+              isSubagent: Boolean(existing.isSubagent || rowIsSubagent),
+              updatedAtMs: Math.max(existing.updatedAtMs, rowUpdatedMs)
+            })
+          }
+        }
+      } catch {
+        // Ignore locked/uninitialized conversation_summaries.db
+      } finally {
+        try {
+          db?.close()
+        } catch {
+          // Ignore close error
+        }
+      }
+    }
+  }
+
+  // Read trailing 64 KiB of history.jsonl for zero-latency turn-1 workspace resolution
+  const HISTORY_TAIL_BYTES = 64 * 1024
+  for (const agDir of agDirs) {
+    const histPath = path.join(agDir, 'history.jsonl')
+    if (!fs.existsSync(histPath)) continue
+    let fd: number | null = null
+    try {
+      const stat = fs.statSync(histPath)
+      if (stat.size <= 0) continue
+      const startOffset = Math.max(0, stat.size - HISTORY_TAIL_BYTES)
+      const toRead = stat.size - startOffset
+      const buf = Buffer.allocUnsafe(toRead)
+      fd = fs.openSync(histPath, 'r')
+      const bytesRead = fs.readSync(fd, buf, 0, toRead, startOffset)
+      if (bytesRead <= 0) continue
+
+      let sliceStart = 0
+      if (startOffset > 0) {
+        const firstNl = buf.subarray(0, bytesRead).indexOf(0x0a)
+        if (firstNl < 0) continue
+        sliceStart = firstNl + 1
+      }
+      const text = buf.subarray(sliceStart, bytesRead).toString('utf8')
+      for (const rawLine of text.split('\n')) {
+        const line = rawLine.trim()
+        if (!line) continue
+        let obj: Record<string, unknown>
+        try {
+          obj = JSON.parse(line) as Record<string, unknown>
+        } catch {
+          continue
+        }
+        const wsPath = decodeFileUriOrPath(obj.workspace ?? obj.cwd ?? obj.project)
+        if (!wsPath) continue
+
+        const rawConvId = obj.conversationId ?? obj.conversation_id ?? obj.sessionId
+        const convId =
+          typeof rawConvId === 'string' && rawConvId.trim() ? rawConvId.trim() : null
+        if (convId) {
+          historyByConvId.set(convId, wsPath)
+        }
+        const tsMs = parseJournalTimestampMs(
+          obj.timestamp ?? obj.createdAt ?? obj.created_at ?? obj.time
+        )
+        const rawDisplay =
+          typeof obj.display === 'string'
+            ? obj.display
+            : typeof obj.prompt === 'string'
+              ? obj.prompt
+              : null
+        const displayPreview = rawDisplay
+          ? cleanConversationTitle(rawDisplay.replace(/<[^>]+>/g, ' '))
+          : null
+        if (tsMs > 0) {
+          historyEntries.push({
+            timestampMs: tsMs,
+            workspacePath: wsPath,
+            conversationId: convId,
+            displayPreview
+          })
+        }
+      }
+    } catch {
+      // Ignore unreadable history.jsonl
+    } finally {
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd)
+        } catch {
+          // Ignore
+        }
+      }
+    }
+  }
+
+  historyEntries.sort((a, b) => b.timestampMs - a.timestampMs)
+  if (historyEntries.length > 200) {
+    historyEntries.length = 200
+  }
+
+  return { summaries, historyByConvId, historyEntries }
+}
+
 /**
- * Reads Orca's `agent-session-journal.db` and `profile-state.db` tab headers strictly in
- * `readOnly: true` mode and closes handles immediately so it never interferes with Orca's WAL writer.
+ * Reads Orca's `agent-session-journal.db`, `profile-state.db` tab headers, and local Antigravity
+ * `conversation_summaries.db` / `history.jsonl` strictly in `readOnly: true` mode.
  */
 export function readOrcaJournalIndex(
   orcaDirs = defaultOrcaAppDataDirs(),
-  homeDir = os.homedir()
+  homeDir = os.homedir(),
+  extraKnownPaths?: Iterable<string>
 ): JournalIndex {
   const byNativeId = new Map<string, JournalSessionMeta>()
   const byOrcaSessionId = new Map<string, JournalSessionMeta>()
   const workspaceActivityMs = new Map<string, number>()
   const ptyCustomTitles = new Map<string, string>()
   const terminalTabOverrides: TerminalTabTitleOverride[] = []
+  const terminalTabs: TerminalTabMeta[] = []
   const cliConfiguredModels = readLocalCliConfiguredModels(homeDir, orcaDirs)
   const accountHomes = new Map<AgentKind, Set<string>>([
     ['claude', new Set()],
@@ -377,6 +849,12 @@ export function readOrcaJournalIndex(
 
   const DatabaseSyncCtor = loadSqliteConstructor()
   if (!DatabaseSyncCtor) {
+    const agDirs = collectAntigravityDataDirs(
+      homeDir,
+      orcaDirs,
+      accountHomes.get('antigravity')!
+    )
+    const agMeta = readAntigravityMetadata(agDirs, null, new Set())
     return {
       byNativeId,
       byOrcaSessionId,
@@ -384,6 +862,10 @@ export function readOrcaJournalIndex(
       workspaceActivityMs,
       ptyCustomTitles,
       terminalTabOverrides,
+      terminalTabs,
+      antigravitySummaries: agMeta.summaries,
+      antigravityHistoryByConversationId: agMeta.historyByConvId,
+      antigravityHistoryEntries: agMeta.historyEntries,
       cliConfiguredModels
     }
   }
@@ -515,10 +997,18 @@ export function readOrcaJournalIndex(
           )
           .all() as Array<{ part_key?: string; payload?: string }>
 
-        const unifiedTerminalMeta = new Map<
-          string,
-          { customLabel: string | null; lastFocusedAt: number }
-        >()
+        type UnifiedTerminalItem = {
+          id: string
+          entityId: string
+          worktreeId: string
+          customLabel: string | null
+          generatedLabel: string | null
+          label: string | null
+          lastFocusedAt: number
+          isExplicitTerminal: boolean
+        }
+        const unifiedTerminalMeta = new Map<string, UnifiedTerminalItem>()
+        const unifiedTerminalByEntity = new Map<string, UnifiedTerminalItem>()
         const rawWorktreeTerminalTabs: Array<Record<string, unknown>> = []
 
         for (const r of tabRows) {
@@ -535,27 +1025,63 @@ export function readOrcaJournalIndex(
             for (const item of arr) {
               if (!item || typeof item !== 'object') continue
               const u = item as Record<string, unknown>
-              const id = typeof u.id === 'string' ? u.id : ''
+              const id = typeof u.id === 'string' ? u.id.trim() : ''
+              const contentType =
+                typeof u.contentType === 'string' ? u.contentType.trim() : undefined
               const customLabel = cleanConversationTitle(u.customLabel)
+              const generatedLabel = sanitizeTerminalGeneratedTitle(u.generatedLabel)
               const label = cleanConversationTitle(u.label)
               const lastFocusedAt = typeof u.lastFocusedAt === 'number' ? u.lastFocusedAt : 0
 
-              if (id.startsWith('structured-agent-session-')) {
-                const orcaSessId = id.slice('structured-agent-session-'.length)
-                const jEntry = byOrcaSessionId.get(orcaSessId)
+              if (
+                contentType === 'agent-session' ||
+                id.startsWith('structured-agent-session-')
+              ) {
+                const orcaSessId =
+                  typeof u.entityId === 'string' && u.entityId.trim()
+                    ? u.entityId.trim()
+                    : id.startsWith('structured-agent-session-')
+                      ? id.slice('structured-agent-session-'.length)
+                      : ''
+                const jEntry = orcaSessId ? byOrcaSessionId.get(orcaSessId) : undefined
                 const effectiveTitle =
-                  customLabel || (!isGenericChatTabLabel(label) ? label : null)
+                  customLabel ||
+                  generatedLabel ||
+                  (!isGenericChatTabLabel(label) ? label : null)
                 if (jEntry && effectiveTitle) {
-                  if (customLabel || !jEntry.title) {
+                  if (customLabel || generatedLabel || !jEntry.title) {
                     jEntry.title = effectiveTitle
-                    const natEntry = byNativeId.get(jEntry.nativeId)
-                    if (natEntry && natEntry.orcaSessionId === orcaSessId) {
-                      natEntry.title = effectiveTitle
+                    for (const natEntry of byNativeId.values()) {
+                      if (natEntry.orcaSessionId === orcaSessId) {
+                        natEntry.title = effectiveTitle
+                      }
                     }
                   }
                 }
-              } else if (id) {
-                unifiedTerminalMeta.set(id, { customLabel, lastFocusedAt })
+              } else if (
+                (contentType === 'terminal' || contentType === undefined) &&
+                id
+              ) {
+                const entityId =
+                  typeof u.entityId === 'string' && u.entityId.trim() ? u.entityId.trim() : ''
+                const worktreeId =
+                  typeof u.worktreeId === 'string' && u.worktreeId.trim()
+                    ? u.worktreeId.trim()
+                    : ''
+                const meta: UnifiedTerminalItem = {
+                  id,
+                  entityId,
+                  worktreeId,
+                  customLabel,
+                  generatedLabel,
+                  label,
+                  lastFocusedAt,
+                  isExplicitTerminal: contentType === 'terminal'
+                }
+                unifiedTerminalMeta.set(id, meta)
+                if (entityId) {
+                  unifiedTerminalByEntity.set(entityId, meta)
+                }
               }
             }
           } else if (r.part_key.startsWith('["tabsByWorktree",')) {
@@ -567,37 +1093,147 @@ export function readOrcaJournalIndex(
           }
         }
 
-        for (const t of rawWorktreeTerminalTabs) {
-          const tabId = typeof t.id === 'string' ? t.id : ''
-          const ptyId = typeof t.ptyId === 'string' ? t.ptyId : ''
-          const uMeta = tabId ? unifiedTerminalMeta.get(tabId) : undefined
-          const customTitle =
-            cleanConversationTitle(t.customTitle) || uMeta?.customLabel || null
-          if (!customTitle || !ptyId) continue
+        const matchedUnifiedIds = new Set<string>()
+        const worktreeIdToPath = new Map<string, string>()
+        const registerPtyTitleKeys = (ptyId: string, tabId: string, title: string) => {
+          if (ptyId) {
+            ptyCustomTitles.set(ptyId, title)
+            ptyCustomTitles.set(`pty:${ptyId}`, title)
+          }
+          if (tabId) {
+            ptyCustomTitles.set(tabId, title)
+          }
+        }
 
-          ptyCustomTitles.set(ptyId, customTitle)
+        for (const t of rawWorktreeTerminalTabs) {
+          const tabId = typeof t.id === 'string' ? t.id.trim() : ''
+          const ptyId = typeof t.ptyId === 'string' ? t.ptyId.trim() : ''
+          const rawWtId = typeof t.worktreeId === 'string' ? t.worktreeId.trim() : ''
+          const uMeta =
+            (tabId ? unifiedTerminalMeta.get(tabId) : undefined) ??
+            (ptyId ? unifiedTerminalByEntity.get(ptyId) : undefined)
+          if (uMeta) matchedUnifiedIds.add(uMeta.id)
+
+          const defaultTitle = typeof t.defaultTitle === 'string' ? t.defaultTitle : null
+          const customPart = cleanConversationTitle(t.customTitle) || uMeta?.customLabel || null
+          const generatedPart =
+            sanitizeTerminalGeneratedTitle(t.generatedTitle, defaultTitle) ||
+            uMeta?.generatedLabel ||
+            null
+          const rawLabelCandidate = cleanConversationTitle(t.title) || uMeta?.label || null
+          const nonGenericLabel =
+            rawLabelCandidate && !isGenericTerminalTabLabel(rawLabelCandidate, defaultTitle)
+              ? rawLabelCandidate
+              : null
+
+          const effectiveTitle = customPart ?? generatedPart ?? nonGenericLabel ?? null
+          const titleSource: TerminalTabTitleSource = customPart
+            ? 'custom'
+            : generatedPart
+              ? 'generated'
+              : nonGenericLabel
+                ? 'label'
+                : null
+          const rawTabLabel =
+            uMeta?.label ||
+            cleanConversationTitle(t.title) ||
+            cleanConversationTitle(defaultTitle) ||
+            null
+
+          if (effectiveTitle) {
+            registerPtyTitleKeys(ptyId, tabId, effectiveTitle)
+          }
 
           const wsPath =
             extractWorkspacePathFromId(t.worktreeId) ||
+            extractWorkspacePathFromId(uMeta?.worktreeId) ||
             (typeof t.startupCwd === 'string' && t.startupCwd.trim()
               ? t.startupCwd.trim()
               : null) ||
             extractWorkspacePathFromId(ptyId)
-          if (!wsPath) continue
+          if (wsPath && rawWtId) {
+            worktreeIdToPath.set(rawWtId, wsPath)
+          }
+          if (!wsPath || (!ptyId && !tabId)) continue
 
           const agent =
-            mapProviderToAgent(t.launchAgent) ?? inferAgentFromTerminalTitle(t.title)
+            mapProviderToAgent(t.launchAgent) ??
+            inferAgentFromTerminalTitle(t.title) ??
+            inferAgentFromTerminalTitle(uMeta?.label)
           const createdAt = typeof t.createdAt === 'number' ? t.createdAt : 0
           const lastFocusedAt = uMeta?.lastFocusedAt ?? createdAt
 
-          terminalTabOverrides.push({
-            ptyId,
+          terminalTabs.push({
+            ptyId: ptyId || tabId,
+            tabId: tabId || ptyId,
             workspacePath: wsPath,
             agent,
-            customTitle,
+            effectiveTitle,
+            titleSource,
+            rawTabLabel,
             createdAt,
-            lastFocusedAt
+            lastFocusedAt,
+            isOpenInUnifiedTabs: uMeta !== undefined
           })
+
+          if (effectiveTitle && ptyId) {
+            terminalTabOverrides.push({
+              ptyId,
+              workspacePath: wsPath,
+              agent,
+              customTitle: effectiveTitle,
+              createdAt,
+              lastFocusedAt
+            })
+          }
+        }
+
+        // Synthesize terminal tab entries for open `unifiedTabs` terminal items not yet flushed to `tabsByWorktree`
+        for (const uMeta of unifiedTerminalMeta.values()) {
+          if (!uMeta.isExplicitTerminal || matchedUnifiedIds.has(uMeta.id)) continue
+          const ptyId = uMeta.entityId || uMeta.id
+          const tabId = uMeta.id
+          const nonGenericLabel =
+            uMeta.label && !isGenericTerminalTabLabel(uMeta.label) ? uMeta.label : null
+          const effectiveTitle = uMeta.customLabel ?? uMeta.generatedLabel ?? nonGenericLabel ?? null
+          const titleSource: TerminalTabTitleSource = uMeta.customLabel
+            ? 'custom'
+            : uMeta.generatedLabel
+              ? 'generated'
+              : nonGenericLabel
+                ? 'label'
+                : null
+          if (effectiveTitle) {
+            registerPtyTitleKeys(ptyId, tabId, effectiveTitle)
+          }
+          const wsPath =
+            (uMeta.worktreeId ? worktreeIdToPath.get(uMeta.worktreeId) : undefined) ||
+            extractWorkspacePathFromId(uMeta.worktreeId) ||
+            extractWorkspacePathFromId(ptyId)
+          if (!wsPath) continue
+          const agent = inferAgentFromTerminalTitle(uMeta.label)
+          terminalTabs.push({
+            ptyId,
+            tabId,
+            workspacePath: wsPath,
+            agent,
+            effectiveTitle,
+            titleSource,
+            rawTabLabel: uMeta.label,
+            createdAt: 0,
+            lastFocusedAt: uMeta.lastFocusedAt,
+            isOpenInUnifiedTabs: true
+          })
+          if (effectiveTitle && ptyId) {
+            terminalTabOverrides.push({
+              ptyId,
+              workspacePath: wsPath,
+              agent,
+              customTitle: effectiveTitle,
+              createdAt: 0,
+              lastFocusedAt: uMeta.lastFocusedAt
+            })
+          }
         }
         break
       } catch {
@@ -612,6 +1248,30 @@ export function readOrcaJournalIndex(
     }
   }
 
+  const preferredNormPaths = new Set<string>()
+  if (extraKnownPaths) {
+    for (const kp of extraKnownPaths) {
+      if (kp) preferredNormPaths.add(normalizePathForMatch(kp))
+    }
+  }
+  for (const jm of byOrcaSessionId.values()) {
+    if (jm.workspacePath) preferredNormPaths.add(normalizePathForMatch(jm.workspacePath))
+  }
+  for (const tt of terminalTabs) {
+    if (tt.workspacePath) preferredNormPaths.add(normalizePathForMatch(tt.workspacePath))
+  }
+  for (const wp of workspaceActivityMs.keys()) {
+    if (wp) preferredNormPaths.add(normalizePathForMatch(wp))
+  }
+  preferredNormPaths.delete('')
+
+  const agDirs = collectAntigravityDataDirs(
+    homeDir,
+    orcaDirs,
+    accountHomes.get('antigravity')!
+  )
+  const agMeta = readAntigravityMetadata(agDirs, DatabaseSyncCtor, preferredNormPaths)
+
   return {
     byNativeId,
     byOrcaSessionId,
@@ -619,6 +1279,10 @@ export function readOrcaJournalIndex(
     workspaceActivityMs,
     ptyCustomTitles,
     terminalTabOverrides,
+    terminalTabs,
+    antigravitySummaries: agMeta.summaries,
+    antigravityHistoryByConversationId: agMeta.historyByConvId,
+    antigravityHistoryEntries: agMeta.historyEntries,
     cliConfiguredModels
   }
 }

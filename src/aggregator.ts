@@ -1,7 +1,13 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { extractWorkspacePathFromId, type JournalIndex } from './journal'
+import {
+  extractWorkspacePathFromId,
+  inferAgentFromTerminalTitle,
+  isGenericTerminalTabLabel,
+  type JournalIndex,
+  type TerminalTabMeta
+} from './journal'
 import type { ParsedTurnUsage, SessionTranscriptState } from './parsers'
 import { type PricingEngine, providerLabelForAgent } from './pricing'
 import type {
@@ -32,6 +38,7 @@ export interface OrcaLiveAgentInfo {
   agent: string | null
   state: AgentRunState
   stateStartedAt: number
+  workspacePath?: string | null
 }
 
 export interface KnownOrcaWorkspace {
@@ -117,6 +124,7 @@ interface EnrichedSession {
   state: SessionTranscriptState
   isSubagent: boolean
   title: string
+  matchedTab?: TerminalTabMeta
   projectName: string | null
   workspacePath: string | null
   workspaceName: string
@@ -272,6 +280,178 @@ function resolveProjectAndWorktree(
   return { projectName, workspaceName: base }
 }
 
+function getEffectiveTerminalTabs(journal: JournalIndex): TerminalTabMeta[] {
+  if (journal.terminalTabs && journal.terminalTabs.length > 0) {
+    return journal.terminalTabs
+  }
+  return (journal.terminalTabOverrides ?? []).map((ov) => ({
+    ptyId: ov.ptyId,
+    tabId: ov.ptyId,
+    workspacePath: ov.workspacePath,
+    agent: ov.agent,
+    effectiveTitle: ov.customTitle,
+    titleSource: 'custom',
+    rawTabLabel: null,
+    createdAt: ov.createdAt,
+    lastFocusedAt: ov.lastFocusedAt,
+    isOpenInUnifiedTabs: true
+  }))
+}
+
+function findTerminalTabById(
+  tabs: TerminalTabMeta[],
+  terminalId: string | null | undefined
+): TerminalTabMeta | undefined {
+  if (!terminalId) return undefined
+  return tabs.find(
+    (t) =>
+      t.ptyId === terminalId ||
+      t.tabId === terminalId ||
+      `pty:${t.ptyId}` === terminalId ||
+      (terminalId.startsWith('pty:') && t.ptyId === terminalId.slice(4))
+  )
+}
+
+function lookupPtyCustomTitle(
+  journal: JournalIndex,
+  terminalId: string | null | undefined
+): string | undefined {
+  if (!terminalId || !journal.ptyCustomTitles) return undefined
+  const direct = journal.ptyCustomTitles.get(terminalId)
+  if (direct) return direct
+  if (terminalId.startsWith('pty:')) {
+    return journal.ptyCustomTitles.get(terminalId.slice(4))
+  }
+  return journal.ptyCustomTitles.get(`pty:${terminalId}`)
+}
+
+function matchTerminalTabsToCliSessions(
+  dedupedStates: Iterable<SessionTranscriptState>,
+  journal: JournalIndex,
+  hasJournalRecords: boolean
+): Map<string, TerminalTabMeta> {
+  const tabBySessionKey = new Map<string, TerminalTabMeta>()
+  const tabs = getEffectiveTerminalTabs(journal)
+  if (tabs.length === 0) return tabBySessionKey
+
+  const candidates = Array.from(dedupedStates).filter((st) => {
+    if (st.isSubagent || st.turnsByKey.size <= 0) return false
+    if (
+      st.agent === 'antigravity' &&
+      st.filePath.includes('antigravity-acp') &&
+      hasJournalRecords
+    ) {
+      return false
+    }
+    const jMeta = journal.byNativeId.get(st.sessionId)
+    if (jMeta) {
+      if (jMeta.isLiveLease || jMeta.isTurnOpen) return false
+      if (st.filePath.includes('antigravity-acp')) return false
+    }
+    return true
+  })
+  if (candidates.length === 0) return tabBySessionKey
+
+  let maxCandidateUpdatedMs = 0
+  for (const st of candidates) {
+    if (st.updatedAtMs > maxCandidateUpdatedMs) maxCandidateUpdatedMs = st.updatedAtMs
+  }
+
+  type PairCandidate = {
+    tabIdx: number
+    tab: TerminalTabMeta
+    st: SessionTranscriptState
+    sKey: string
+    isStandaloneCli: boolean
+    ownsInterval: boolean
+    isOccupying: boolean
+  }
+  const pairs: PairCandidate[] = []
+
+  for (let tabIdx = 0; tabIdx < tabs.length; tabIdx++) {
+    const tab = tabs[tabIdx]
+    for (const st of candidates) {
+      if (tab.agent && st.agent !== tab.agent) continue
+      const jMeta = journal.byNativeId.get(st.sessionId)
+      const sessWs = jMeta?.workspacePath || st.cwd
+      if (!isSameOrChildWorktreePath(sessWs, tab.workspacePath)) continue
+      if (jMeta && !(tab.createdAt > 0 && st.updatedAtMs >= tab.createdAt)) continue
+      if (
+        tab.createdAt > 0 &&
+        st.createdAtMs < tab.createdAt - 15_000 &&
+        st.updatedAtMs < tab.createdAt
+      ) {
+        continue
+      }
+
+      const spawnedAfterTab = tab.createdAt > 0 && st.createdAtMs >= tab.createdAt - 15_000
+      let hasNewerCompatibleTabBeforeSpawn = false
+      if (spawnedAfterTab) {
+        const tabOpenRank = tab.isOpenInUnifiedTabs ? 1 : 0
+        for (let j = 0; j < tabs.length; j++) {
+          if (j === tabIdx) continue
+          const other = tabs[j]
+          if ((other.isOpenInUnifiedTabs ? 1 : 0) < tabOpenRank) continue
+          if (other.agent && other.agent !== st.agent) continue
+          if (!isSameOrChildWorktreePath(sessWs, other.workspacePath)) continue
+          if (other.createdAt > tab.createdAt && other.createdAt <= st.createdAtMs + 2_000) {
+            hasNewerCompatibleTabBeforeSpawn = true
+            break
+          }
+        }
+      }
+
+      const isOccupying =
+        (st.lastEventState === 'working' || st.lastEventState === 'waiting') &&
+        maxCandidateUpdatedMs - st.updatedAtMs <= 90_000
+
+      pairs.push({
+        tabIdx,
+        tab,
+        st,
+        sKey: `${st.agent}:${st.sessionId}`,
+        isStandaloneCli: jMeta === undefined,
+        ownsInterval: spawnedAfterTab && !hasNewerCompatibleTabBeforeSpawn,
+        isOccupying
+      })
+    }
+  }
+
+  pairs.sort((a, b) => {
+    const openDiff = (b.tab.isOpenInUnifiedTabs ? 1 : 0) - (a.tab.isOpenInUnifiedTabs ? 1 : 0)
+    if (openDiff !== 0) return openDiff
+    const cliDiff = (b.isStandaloneCli ? 1 : 0) - (a.isStandaloneCli ? 1 : 0)
+    if (cliDiff !== 0) return cliDiff
+    const intervalDiff = (b.ownsInterval ? 1 : 0) - (a.ownsInterval ? 1 : 0)
+    if (intervalDiff !== 0) return intervalDiff
+    const titledDiff = (b.tab.effectiveTitle !== null ? 1 : 0) - (a.tab.effectiveTitle !== null ? 1 : 0)
+    if (titledDiff !== 0) return titledDiff
+    const occDiff = (b.isOccupying ? 1 : 0) - (a.isOccupying ? 1 : 0)
+    if (occDiff !== 0) return occDiff
+
+    const aDist = Math.abs(a.st.createdAtMs - a.tab.createdAt)
+    const bDist = Math.abs(b.st.createdAtMs - b.tab.createdAt)
+    // Concurrent active sessions cannot share one PTY sequentially: prefer spawn proximity to tab
+    if (a.isOccupying && b.isOccupying && aDist !== bDist) {
+      return aDist - bDist
+    }
+    if (b.st.updatedAtMs !== a.st.updatedAtMs) return b.st.updatedAtMs - a.st.updatedAtMs
+    if (aDist !== bDist) return aDist - bDist
+    return b.tab.lastFocusedAt - a.tab.lastFocusedAt
+  })
+
+  const claimedTabs = new Set<number>()
+  const claimedSessions = new Set<string>()
+  for (const p of pairs) {
+    if (claimedTabs.has(p.tabIdx) || claimedSessions.has(p.sKey)) continue
+    claimedTabs.add(p.tabIdx)
+    claimedSessions.add(p.sKey)
+    tabBySessionKey.set(p.sKey, p.tab)
+  }
+
+  return tabBySessionKey
+}
+
 function enrichSessions(
   sessions: SessionTranscriptState[],
   journal: JournalIndex,
@@ -296,51 +476,11 @@ function enrichSessions(
   }
 
   const hasJournalRecords = journal.byNativeId.size > 0
-
-  // Map user-renamed Orca PTY terminal tab headers (`customTitle`, e.g. `# 优化 skills`) onto their active CLI session
-  const cliCustomTitleBySessionKey = new Map<string, string>()
-  const tabOverrides = [...(journal.terminalTabOverrides ?? [])].sort(
-    (a, b) => b.lastFocusedAt - a.lastFocusedAt || b.createdAt - a.createdAt
+  const tabBySessionKey = matchTerminalTabsToCliSessions(
+    dedupedStates.values(),
+    journal,
+    hasJournalRecords
   )
-  if (tabOverrides.length > 0) {
-    const cliCandidates = Array.from(dedupedStates.values())
-      .filter((st) => {
-        if (st.isSubagent || journal.byNativeId.has(st.sessionId)) return false
-        if (
-          st.agent === 'antigravity' &&
-          st.filePath.includes('antigravity-acp') &&
-          hasJournalRecords
-        ) {
-          return false
-        }
-        return st.turnsByKey.size > 0
-      })
-      .sort((a, b) => b.updatedAtMs - a.updatedAtMs)
-
-    const claimedKeys = new Set<string>()
-    for (const tab of tabOverrides) {
-      const eligible = cliCandidates.filter((st) => {
-        const sKey = `${st.agent}:${st.sessionId}`
-        if (claimedKeys.has(sKey)) return false
-        if (tab.agent && st.agent !== tab.agent) return false
-        if (!isSameOrChildWorktreePath(st.cwd, tab.workspacePath)) return false
-        if (tab.createdAt <= 0) return true
-        return st.createdAtMs >= tab.createdAt - 15_000 || st.updatedAtMs >= tab.createdAt
-      })
-      eligible.sort((a, b) => {
-        const aSpawnedInTab = tab.createdAt > 0 && a.createdAtMs >= tab.createdAt - 15_000 ? 1 : 0
-        const bSpawnedInTab = tab.createdAt > 0 && b.createdAtMs >= tab.createdAt - 15_000 ? 1 : 0
-        if (aSpawnedInTab !== bSpawnedInTab) return bSpawnedInTab - aSpawnedInTab
-        return b.updatedAtMs - a.updatedAtMs
-      })
-      const matchedCli = eligible[0]
-      if (matchedCli) {
-        const sKey = `${matchedCli.agent}:${matchedCli.sessionId}`
-        claimedKeys.add(sKey)
-        cliCustomTitleBySessionKey.set(sKey, tab.customTitle)
-      }
-    }
-  }
 
   const out: EnrichedSession[] = []
 
@@ -369,9 +509,16 @@ function enrichSessions(
     const isSubagent = Boolean(st.isSubagent || isUnlinkedAcpSubagent)
 
     const sKey = `${st.agent}:${st.sessionId}`
+    const matchedTab = tabBySessionKey.get(sKey)
+    const agSummaryTitle =
+      st.agent === 'antigravity'
+        ? journal.antigravitySummaries?.get(st.sessionId)?.title ?? null
+        : null
     const title =
-      cliCustomTitleBySessionKey.get(sKey) ||
+      matchedTab?.effectiveTitle ||
+      st.cliCustomTitle ||
       jMeta?.title ||
+      agSummaryTitle ||
       st.titleHint ||
       `${providerLabelForAgent(st.agent, summary.topModel)} · ${st.sessionId.slice(0, 8)}`
 
@@ -384,6 +531,7 @@ function enrichSessions(
       state: st,
       isSubagent,
       title,
+      matchedTab,
       projectName,
       workspacePath,
       workspaceName,
@@ -854,7 +1002,11 @@ function canBindPtyToCliSession(
   journal: JournalIndex,
   now: number
 ): boolean {
-  if (journal.byNativeId.has(s.state.sessionId)) return false
+  const jMeta = journal.byNativeId.get(s.state.sessionId)
+  if (jMeta) {
+    if (jMeta.isLiveLease || jMeta.isTurnOpen) return false
+    if (s.state.filePath.includes('antigravity-acp')) return false
+  }
   if (s.state.agent === 'antigravity' && s.state.filePath.includes('antigravity-acp')) {
     return false
   }
@@ -880,6 +1032,33 @@ function canBindPtyToCliSession(
   return lastTouchMs >= now - 6 * 3600_000
 }
 
+function selectBestSessionForPty(
+  sortedByRecent: EnrichedSession[],
+  claimedKeys: Set<string>,
+  la: OrcaLiveAgentInfo,
+  matchedTab: TerminalTabMeta | undefined,
+  mappedKind: AgentKind | null,
+  termWsPath: string | null,
+  journal: JournalIndex,
+  now: number
+): EnrichedSession | undefined {
+  if (matchedTab) {
+    const prebound = sortedByRecent.find((s) => {
+      const sKey = `${s.state.agent}:${s.state.sessionId}`
+      if (claimedKeys.has(sKey)) return false
+      if (s.matchedTab !== matchedTab) return false
+      return canBindPtyToCliSession(s, la, mappedKind, termWsPath, journal, now)
+    })
+    if (prebound) return prebound
+  }
+  return sortedByRecent.find((s) => {
+    const sKey = `${s.state.agent}:${s.state.sessionId}`
+    if (claimedKeys.has(sKey)) return false
+    if (matchedTab && s.matchedTab && s.matchedTab !== matchedTab) return false
+    return canBindPtyToCliSession(s, la, mappedKind, termWsPath, journal, now)
+  })
+}
+
 function matchPtyTerminalsToSessions(
   userSessions: EnrichedSession[],
   journal: JournalIndex,
@@ -888,6 +1067,7 @@ function matchPtyTerminalsToSessions(
 ): Map<string, OrcaLiveAgentInfo> {
   const recentLiveCutoffMs = now - 15 * 60_000
   const hasJournalRecords = journal.byNativeId.size > 0
+  const terminalTabs = getEffectiveTerminalTabs(journal)
   const sortedByRecent = [...userSessions].sort(
     (a, b) => b.state.updatedAtMs - a.state.updatedAtMs
   )
@@ -899,13 +1079,25 @@ function matchPtyTerminalsToSessions(
     if (la.state === 'done' && la.stateStartedAt > 0 && la.stateStartedAt < recentLiveCutoffMs) {
       continue
     }
-    const mappedKind = mapOrcaAgentKind(la.agent)
-    const termWsPath = extractWorkspacePathFromId(la.terminalId)
-    const matched = sortedByRecent.find((s) => {
-      const sKey = `${s.state.agent}:${s.state.sessionId}`
-      if (claimed.has(sKey)) return false
-      return canBindPtyToCliSession(s, la, mappedKind, termWsPath, journal, now)
-    })
+    const matchedTab = findTerminalTabById(terminalTabs, la.terminalId)
+    const mappedKind =
+      mapOrcaAgentKind(la.agent) ??
+      matchedTab?.agent ??
+      inferAgentFromTerminalTitle(la.title)
+    const termWsPath =
+      la.workspacePath ??
+      matchedTab?.workspacePath ??
+      extractWorkspacePathFromId(la.terminalId)
+    const matched = selectBestSessionForPty(
+      sortedByRecent,
+      claimed,
+      la,
+      matchedTab,
+      mappedKind,
+      termWsPath,
+      journal,
+      now
+    )
     if (matched) {
       const sKey = `${matched.state.agent}:${matched.state.sessionId}`
       claimed.add(sKey)
@@ -1213,6 +1405,7 @@ function buildLiveAgentCards(params: {
   const homeNorm = normalizeFsPath(os.homedir())
   const nowEndSec = Math.floor((Number.isFinite(now) && now > 0 ? now : Date.now()) / 1000)
   const hasJournalRecords = journal.byNativeId.size > 0
+  const terminalTabs = getEffectiveTerminalTabs(journal)
 
   for (let idx = 0; idx < runtime.liveAgents.length; idx++) {
     const la = runtime.liveAgents[idx]
@@ -1228,15 +1421,28 @@ function buildLiveAgentCards(params: {
       continue
     }
 
-    const mappedKind = mapOrcaAgentKind(la.agent)
-    const termWsPath = extractWorkspacePathFromId(la.terminalId)
-    const ptyCustomTitle = la.terminalId ? journal.ptyCustomTitles?.get(la.terminalId) : undefined
+    const matchedTab = findTerminalTabById(terminalTabs, la.terminalId)
+    const mappedKind =
+      mapOrcaAgentKind(la.agent) ??
+      matchedTab?.agent ??
+      inferAgentFromTerminalTitle(la.title)
+    const termWsPath =
+      la.workspacePath ??
+      matchedTab?.workspacePath ??
+      extractWorkspacePathFromId(la.terminalId)
+    const ptyCustomTitle =
+      lookupPtyCustomTitle(journal, la.terminalId) ?? matchedTab?.effectiveTitle ?? undefined
 
-    const matchedSession = sortedByRecent.find((s) => {
-      const sKey = `${s.state.agent}:${s.state.sessionId}`
-      if (claimedSessionKeys.has(sKey)) return false
-      return canBindPtyToCliSession(s, la, mappedKind, termWsPath, journal, now)
-    })
+    const matchedSession = selectBestSessionForPty(
+      sortedByRecent,
+      claimedSessionKeys,
+      la,
+      matchedTab,
+      mappedKind,
+      termWsPath,
+      journal,
+      now
+    )
 
     if (matchedSession) {
       const sKey = `${matchedSession.state.agent}:${matchedSession.state.sessionId}`
@@ -1301,6 +1507,16 @@ function buildLiveAgentCards(params: {
         now,
         isWorking && la.stateStartedAt > 0 ? la.stateStartedAt : 0
       )
+      const nonGenericLaTitle =
+        la.title && !isGenericTerminalTabLabel(la.title, matchedTab?.rawTabLabel)
+          ? la.title.trim()
+          : null
+      const zeroTurnTitle =
+        ptyCustomTitle ||
+        nonGenericLaTitle ||
+        matchedTab?.rawTabLabel ||
+        la.title?.trim() ||
+        `${mappedKind} session`
       cards.push({
         id: la.terminalId || fallbackKey,
         sessionKey: fallbackKey,
@@ -1308,7 +1524,7 @@ function buildLiveAgentCards(params: {
         providerLabel: providerLabelForAgent(mappedKind, fallbackModel),
         modelLabel: fallbackModel,
         state: la.state,
-        title: ptyCustomTitle || la.title?.trim() || `${mappedKind} session`,
+        title: zeroTurnTitle,
         projectName: resolvedWs.projectName ?? effectiveProject,
         workspaceName:
           resolvedWs.workspaceName !== 'local'
@@ -1427,7 +1643,15 @@ export function pollSingleLiveAgent(
     now
   })
 
-  const hit = liveCards.find((c) => c.sessionKey === sessionKey || c.id === sessionKey)
+  const terminalLookupId = sessionKey.startsWith('terminal:')
+    ? sessionKey.slice('terminal:'.length)
+    : null
+  const hit = liveCards.find(
+    (c) =>
+      c.sessionKey === sessionKey ||
+      c.id === sessionKey ||
+      (terminalLookupId !== null && c.id === terminalLookupId)
+  )
   if (hit) return hit
 
   // Fallback if user keeps an agent detail view open after 15m idle cutoff

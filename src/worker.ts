@@ -43,6 +43,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   let pricingTimer: ReturnType<typeof setInterval> | null = null
   let statusDebounceTimer: ReturnType<typeof setTimeout> | null = null
   let focusSettleTimer: ReturnType<typeof setTimeout> | null = null
+  let tabRenameSettleTimer: ReturnType<typeof setTimeout> | null = null
   let stopped = false
   let refreshInFlight: Promise<DashboardSnapshot> | null = null
   let latestSnapshot: DashboardSnapshot | null = null
@@ -115,15 +116,27 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     try {
       if (orca.host.has('agents.list')) {
         const res = await orca.host.call('agents.list', {})
+        const prevByTerminalId = new Map<string, OrcaLiveAgentInfo>()
+        for (const p of runtime.liveAgents) {
+          if (p.terminalId) prevByTerminalId.set(p.terminalId, p)
+        }
         const freshIds = new Set<string>()
         const nextAgents: OrcaLiveAgentInfo[] = res.agents.map((a) => {
           if (a.terminalId) freshIds.add(a.terminalId)
+          const prev = a.terminalId ? prevByTerminalId.get(a.terminalId) : undefined
+          const wsPath = a.terminalId
+            ? terminalToWorkspacePath.get(a.terminalId) ??
+              extractWorkspacePathFromId(a.terminalId) ??
+              prev?.workspacePath ??
+              null
+            : null
           return {
             terminalId: a.terminalId,
-            title: a.title,
-            agent: a.agent,
+            title: a.title ?? prev?.title ?? null,
+            agent: a.agent ?? prev?.agent ?? null,
             state: a.state,
-            stateStartedAt: a.stateStartedAt
+            stateStartedAt: a.stateStartedAt,
+            workspacePath: wsPath
           }
         })
         const staleDoneCutoff = now - 15 * 60_000
@@ -426,8 +439,8 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
       if (!sessionKey || sessionKey.length > 512) {
         return { generatedAt: now, agent: null }
       }
-      const sessions = scanner.pollHotFiles(now, sessionKey)
       const journal = scanner.refreshJournal(now, 800)
+      const sessions = scanner.pollHotFiles(now, sessionKey)
       const agent = pollSingleLiveAgent(
         sessionKey,
         sessions,
@@ -507,7 +520,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     })
   )
 
-  // Subscribe to Orca left-sidebar focus changes: compute immediately + 250ms settle pass after WAL flush
+  // Subscribe to Orca left-sidebar focus & tab changes: compute immediately + 250ms & 900ms post-WAL settle passes
   disposables.push(
     orca.events.on('workspace.changed', async ({ context }) => {
       if (context) {
@@ -515,10 +528,25 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
       }
       await computeAndPublish(true)
       if (focusSettleTimer) clearTimeout(focusSettleTimer)
+      if (tabRenameSettleTimer) clearTimeout(tabRenameSettleTimer)
       focusSettleTimer = setTimeout(() => {
         focusSettleTimer = null
         if (!stopped) void computeAndPublish(false)
       }, 250)
+      tabRenameSettleTimer = setTimeout(() => {
+        tabRenameSettleTimer = null
+        if (stopped) return
+        const runPostFlushJournalPublish = () => {
+          if (stopped) return
+          scanner.refreshJournal(Date.now(), 0)
+          void computeAndPublish(false)
+        }
+        if (refreshInFlight) {
+          void refreshInFlight.finally(runPostFlushJournalPublish)
+        } else {
+          runPostFlushJournalPublish()
+        }
+      }, 900)
     })
   )
 
@@ -537,7 +565,9 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   disposables.push(
     orca.events.on('agent.status.changed', async (ev) => {
       if (ev.terminalId && ev.workspaceId) {
-        const wsPath = extractWorkspacePathFromId(ev.workspaceId)
+        const wsPath =
+          workspaceListCache.find((w) => w.id === ev.workspaceId)?.path ??
+          extractWorkspacePathFromId(ev.workspaceId)
         if (wsPath) {
           terminalToWorkspacePath.set(ev.terminalId, wsPath)
         }
@@ -547,12 +577,18 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
         (a) => !ev.terminalId || a.terminalId !== ev.terminalId
       )
       if (ev.terminalId) {
+        const wsPath =
+          terminalToWorkspacePath.get(ev.terminalId) ??
+          extractWorkspacePathFromId(ev.terminalId) ??
+          prev?.workspacePath ??
+          null
         nextList.unshift({
           terminalId: ev.terminalId,
           title: ev.title ?? prev?.title ?? null,
           agent: prev?.agent ?? null,
           state: ev.state,
-          stateStartedAt: ev.receivedAt
+          stateStartedAt: ev.receivedAt,
+          workspacePath: wsPath
         })
       }
       runtime.liveAgents = nextList
@@ -587,6 +623,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     if (pricingTimer) clearInterval(pricingTimer)
     if (statusDebounceTimer) clearTimeout(statusDebounceTimer)
     if (focusSettleTimer) clearTimeout(focusSettleTimer)
+    if (tabRenameSettleTimer) clearTimeout(tabRenameSettleTimer)
     await flushHistoricalCache(true)
     for (const d of disposables) {
       try {

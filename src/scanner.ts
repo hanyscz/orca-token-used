@@ -29,7 +29,7 @@ export interface DiscoveredFile {
   sizeBytes: number
 }
 
-export const HISTORICAL_CACHE_STORAGE_KEY = 'historicalSessions.v3'
+export const HISTORICAL_CACHE_STORAGE_KEY = 'historicalSessions.v4'
 
 export interface CachedFileSummary {
   sessionId: string
@@ -38,6 +38,7 @@ export interface CachedFileSummary {
   sizeBytes: number
   mtimeMs: number
   cwd: string | null
+  cliCustomTitle?: string | null
   titleHint: string | null
   isInternalHelper: boolean
   isSubagent?: boolean
@@ -271,6 +272,7 @@ export class TranscriptScanner {
       st.lastSizeBytes = item.sizeBytes
       st.lastMtimeMs = item.mtimeMs
       st.cwd = item.cwd
+      st.cliCustomTitle = item.cliCustomTitle ?? null
       st.titleHint = item.titleHint
       st.isInternalHelper = Boolean(item.isInternalHelper)
       st.isSubagent = Boolean(item.isSubagent)
@@ -392,7 +394,8 @@ export class TranscriptScanner {
         filePath,
         sizeBytes: st.lastSizeBytes,
         mtimeMs: st.lastMtimeMs,
-        cwd: st.cwd,
+        cwd: st.cwdIsHeuristic ? null : st.cwd,
+        cliCustomTitle: st.cliCustomTitle,
         titleHint: st.titleHint,
         isInternalHelper: st.isInternalHelper,
         isSubagent: st.isSubagent,
@@ -412,10 +415,89 @@ export class TranscriptScanner {
 
   refreshJournal(now = Date.now(), minIntervalMs = 800): JournalIndex {
     if (now - this.lastJournalRefreshMs >= minIntervalMs) {
-      this.journalIndex = readOrcaJournalIndex(this.orcaAppDirs, this.homeDir)
+      this.journalIndex = readOrcaJournalIndex(
+        this.orcaAppDirs,
+        this.homeDir,
+        this.knownWorkspacePaths
+      )
       this.lastJournalRefreshMs = now
     }
     return this.journalIndex
+  }
+
+  private applyJournalSessionHints(now: number): void {
+    const summaries = this.journalIndex.antigravitySummaries
+    const histByConv = this.journalIndex.antigravityHistoryByConversationId
+    const histEntries = this.journalIndex.antigravityHistoryEntries
+    if (!summaries?.size && !histByConv?.size && !histEntries?.length) return
+
+    const todayStart = new Date(now)
+    todayStart.setHours(0, 0, 0, 0)
+    const todayStartMs = todayStart.getTime()
+
+    for (const state of this.statesByFile.values()) {
+      if (state.agent !== 'antigravity') continue
+      let persistedFieldChanged = false
+
+      const summary = summaries?.get(state.sessionId)
+      const explicitHistWs = histByConv?.get(state.sessionId) ?? null
+      const authoritativeWs = summary?.workspacePath || explicitHistWs || null
+
+      if (authoritativeWs && (!state.cwd || state.cwdIsHeuristic)) {
+        if (state.cwd !== authoritativeWs || state.cwdIsHeuristic) {
+          state.cwd = authoritativeWs
+          state.cwdIsHeuristic = false
+          persistedFieldChanged = true
+        }
+      } else if (!state.cwd && state.createdAtMs > 0 && histEntries && histEntries.length > 0) {
+        const candidates = histEntries.filter(
+          (e) =>
+            (!e.conversationId || e.conversationId === state.sessionId) &&
+            Math.abs(e.timestampMs - state.createdAtMs) <= 15_000
+        )
+        if (candidates.length > 0) {
+          const hintPrefix = state.titleHint ? state.titleHint.slice(0, 24) : ''
+          candidates.sort((a, b) => {
+            const aMatch =
+              hintPrefix &&
+              a.displayPreview &&
+              (state.titleHint!.startsWith(a.displayPreview.slice(0, 24)) ||
+                a.displayPreview.startsWith(hintPrefix))
+                ? 1
+                : 0
+            const bMatch =
+              hintPrefix &&
+              b.displayPreview &&
+              (state.titleHint!.startsWith(b.displayPreview.slice(0, 24)) ||
+                b.displayPreview.startsWith(hintPrefix))
+                ? 1
+                : 0
+            if (aMatch !== bMatch) return bMatch - aMatch
+            return (
+              Math.abs(a.timestampMs - state.createdAtMs) -
+              Math.abs(b.timestampMs - state.createdAtMs)
+            )
+          })
+          state.cwd = candidates[0].workspacePath
+          state.cwdIsHeuristic = true
+        }
+      }
+
+      if (summary?.isSubagent && !state.isSubagent) {
+        state.isSubagent = true
+        persistedFieldChanged = true
+      }
+
+      if (
+        persistedFieldChanged &&
+        state.lastMtimeMs > 0 &&
+        state.lastMtimeMs < todayStartMs &&
+        state.turnsByKey.size > 0 &&
+        !state.isInternalHelper
+      ) {
+        this.dirtyHistoricalCache = true
+      }
+    }
   }
 
   getSessions(): SessionTranscriptState[] {
@@ -504,6 +586,7 @@ export class TranscriptScanner {
         // Ignore transient read error
       }
     }
+    this.applyJournalSessionHints(now)
     return this.getSessions()
   }
 
@@ -513,7 +596,11 @@ export class TranscriptScanner {
 
     // Refresh Orca journal DB + profile tab headers + CLI model settings at most every 2s (or on forced scan)
     if (options.forceFullDiscovery || now - this.lastJournalRefreshMs >= 2000) {
-      this.journalIndex = readOrcaJournalIndex(this.orcaAppDirs, this.homeDir)
+      this.journalIndex = readOrcaJournalIndex(
+        this.orcaAppDirs,
+        this.homeDir,
+        this.knownWorkspacePaths
+      )
       this.lastJournalRefreshMs = now
     }
 
@@ -620,6 +707,7 @@ export class TranscriptScanner {
       }
     }
 
+    this.applyJournalSessionHints(now)
     return this.getSessions()
   }
 
@@ -753,6 +841,12 @@ export class TranscriptScanner {
       const allKnownPaths = new Set<string>(this.knownWorkspacePaths)
       for (const jMeta of this.journalIndex.byNativeId.values()) {
         if (jMeta.workspacePath) allKnownPaths.add(jMeta.workspacePath)
+      }
+      for (const tTab of this.journalIndex.terminalTabs ?? []) {
+        if (tTab.workspacePath) allKnownPaths.add(tTab.workspacePath)
+      }
+      for (const tOv of this.journalIndex.terminalTabOverrides ?? []) {
+        if (tOv.workspacePath) allKnownPaths.add(tOv.workspacePath)
       }
       this.geminiProjectMap = buildGeminiProjectHashLookup(geminiRoot, allKnownPaths)
       const found: Array<{ filePath: string; mtimeMs: number; sizeBytes: number; stat: Stats }> = []

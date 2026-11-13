@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -6,14 +7,16 @@ import { assert, describe, mockHost, mountWorker, test } from 'orca/testing'
 import {
   buildDashboardSnapshot,
   compute60sIoSeries,
-  isSameOrChildWorktreePath
+  isSameOrChildWorktreePath,
+  pollSingleLiveAgent
 } from './aggregator'
 import {
   cleanConversationTitle,
   extractWorkspacePathFromId,
   type JournalIndex,
   normalizeConfiguredModelSlug,
-  readOrcaActiveWorktreeSelection
+  readOrcaActiveWorktreeSelection,
+  readOrcaJournalIndex
 } from './journal'
 import {
   escapeHtml,
@@ -1064,16 +1067,22 @@ describe('Trusted Worker Integration, Left-Sidebar Focus Tracking & Host Contrac
 
       // Create synthetic Orca `profile-state.db` to simulate left-sidebar Project -> Worktree focus changes
       const req = createRequire(import.meta.url)
-      const { DatabaseSync } = req('node:sqlite') as {
-        DatabaseSync: new (p: string) => {
+      const sqliteMod = req('node:sqlite') as {
+        Database?: new (p: string) => {
+          exec(sql: string): void
+          prepare(sql: string): { run(...args: unknown[]): void }
+          close(): void
+        }
+        DatabaseSync?: new (p: string) => {
           exec(sql: string): void
           prepare(sql: string): { run(...args: unknown[]): void }
           close(): void
         }
       }
+      const SqliteCtor = sqliteMod.Database ?? sqliteMod.DatabaseSync!
       const profileDbPath = path.join(profileDir, 'profile-state.db')
       const setLeftSidebarFocus = (worktreeId: string) => {
-        const db = new DatabaseSync(profileDbPath)
+        const db = new SqliteCtor(profileDbPath)
         db.exec(
           'CREATE TABLE IF NOT EXISTS profile_state_document_parts (domain TEXT NOT NULL, part_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (domain, part_key))'
         )
@@ -1210,5 +1219,1154 @@ describe('Trusted Worker Integration, Left-Sidebar Focus Tracking & Host Contrac
     } finally {
       fs.rmSync(tmpHome, { recursive: true, force: true })
     }
+  })
+})
+
+type TestSqliteHandle = {
+  exec(sql: string): void
+  prepare(sql: string): { run(...args: unknown[]): void }
+  close(): void
+}
+
+function openWritableTestSqlite(dbPath: string): TestSqliteHandle {
+  const req = createRequire(import.meta.url)
+  const sqliteMod = req('node:sqlite') as {
+    Database?: new (p: string) => TestSqliteHandle
+    DatabaseSync?: new (p: string) => TestSqliteHandle
+  }
+  const Ctor = sqliteMod.Database ?? sqliteMod.DatabaseSync
+  if (!Ctor) throw new Error('node:sqlite constructor unavailable')
+  return new Ctor(dbPath)
+}
+
+function writeTestProfileStateParts(
+  profileDbPath: string,
+  parts: Array<{ domain?: string; key: string; payload: unknown }>
+): void {
+  fs.mkdirSync(path.dirname(profileDbPath), { recursive: true })
+  const db = openWritableTestSqlite(profileDbPath)
+  try {
+    db.exec(
+      'CREATE TABLE IF NOT EXISTS profile_state_document_parts (domain TEXT NOT NULL, part_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (domain, part_key))'
+    )
+    const stmt = db.prepare(
+      'INSERT OR REPLACE INTO profile_state_document_parts (domain, part_key, payload) VALUES (?, ?, ?)'
+    )
+    for (const p of parts) {
+      stmt.run(p.domain ?? 'workspaceSession', p.key, JSON.stringify(p.payload))
+    }
+  } finally {
+    db.close()
+  }
+}
+
+function writeTestAntigravitySummariesDb(
+  dbPath: string,
+  rows: Array<{
+    conversation_id: string
+    title: string
+    workspace_uris: string
+    last_modified_time: string
+    parent_conversation_id?: string
+    nesting_depth?: number
+  }>,
+  parentLinks: Array<{ conversation_id: string; parent_conversation_id: string }> = []
+): void {
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true })
+  const db = openWritableTestSqlite(dbPath)
+  try {
+    db.exec(
+      'CREATE TABLE IF NOT EXISTS conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, workspace_uris TEXT, last_modified_time TEXT, parent_conversation_id TEXT, nesting_depth INTEGER)'
+    )
+    const stmt = db.prepare(
+      'INSERT OR REPLACE INTO conversation_summaries (conversation_id, title, workspace_uris, last_modified_time, parent_conversation_id, nesting_depth) VALUES (?, ?, ?, ?, ?, ?)'
+    )
+    for (const r of rows) {
+      stmt.run(
+        r.conversation_id,
+        r.title,
+        r.workspace_uris,
+        r.last_modified_time,
+        r.parent_conversation_id ?? '',
+        r.nesting_depth ?? 0
+      )
+    }
+    if (parentLinks.length > 0) {
+      db.exec(
+        'CREATE TABLE IF NOT EXISTS conversation_parents (conversation_id TEXT PRIMARY KEY, parent_conversation_id TEXT NOT NULL)'
+      )
+      const pStmt = db.prepare(
+        'INSERT OR REPLACE INTO conversation_parents (conversation_id, parent_conversation_id) VALUES (?, ?)'
+      )
+      for (const link of parentLinks) {
+        pStmt.run(link.conversation_id, link.parent_conversation_id)
+      }
+    }
+  } finally {
+    db.close()
+  }
+}
+
+describe('Terminal Tab & Handoff Title Synchronization Regressions', () => {
+  test('resolves Antigravity CLI cwd from conversation_summaries.db and history.jsonl, merging #54 terminal tab into a single worktree card and filtering subagents', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-ag-term-54-'))
+    try {
+      const homeDir = path.join(tmpRoot, 'home')
+      const orcaDir = path.join(tmpRoot, 'orca')
+      const wtPath = path.join(tmpRoot, 'workspaces', 'qbibotlive', 'release-1.0')
+      const otherRoot = path.join(tmpRoot, 'workspaces', 'unrelated-root')
+      fs.mkdirSync(wtPath, { recursive: true })
+      fs.mkdirSync(otherRoot, { recursive: true })
+
+      const wtId = `repo-qbi::${wtPath}`
+      const ptyId = `${wtId}@@pty54`
+      const now = Date.UTC(2026, 10, 13, 1, 30, 0)
+
+      writeTestProfileStateParts(path.join(orcaDir, 'profiles', 'local-default', 'profile-state.db'), [
+        { key: '["activeWorktreeId"]', payload: wtId },
+        {
+          key: `["tabsByWorktree",${JSON.stringify(wtId)}]`,
+          payload: [
+            {
+              id: 'tab-54',
+              ptyId,
+              worktreeId: wtId,
+              title: 'Terminal 1',
+              defaultTitle: 'Terminal 1',
+              customTitle: '#54',
+              generatedTitle: null,
+              launchAgent: 'antigravity',
+              createdAt: now - 120_000
+            }
+          ]
+        },
+        {
+          key: `["unifiedTabs",${JSON.stringify(wtId)}]`,
+          payload: [
+            {
+              id: 'tab-54',
+              contentType: 'terminal',
+              entityId: ptyId,
+              worktreeId: wtId,
+              label: 'Terminal 1',
+              customLabel: '#54',
+              generatedLabel: null,
+              lastFocusedAt: now - 5_000
+            },
+            {
+              id: 'tab-54-browser',
+              contentType: 'browser',
+              entityId: ptyId,
+              worktreeId: wtId,
+              label: 'localhost:3000',
+              customLabel: 'Browser Must Not Hijack',
+              lastFocusedAt: now - 1_000
+            }
+          ]
+        }
+      ])
+
+      // Authoritative summary in antigravity-cli + newer blank title in antigravity (must merge non-destructively)
+      const wtUri = `file://${wtPath}`
+      const otherUri = `file://${otherRoot}`
+      writeTestAntigravitySummariesDb(
+        path.join(homeDir, '.gemini', 'antigravity-cli', 'conversation_summaries.db'),
+        [
+          {
+            conversation_id: '228134bd-main',
+            title: 'Issue #54 需求與問題釐清',
+            workspace_uris: JSON.stringify([otherUri, wtUri]),
+            last_modified_time: new Date(now - 30_000).toISOString(),
+            parent_conversation_id: '',
+            nesting_depth: 0
+          },
+          {
+            conversation_id: 'sub-brain-99',
+            title: 'Codebase Subagent Audit',
+            workspace_uris: JSON.stringify([wtUri]),
+            last_modified_time: new Date(now - 20_000).toISOString(),
+            parent_conversation_id: '228134bd-main',
+            nesting_depth: 1
+          }
+        ]
+      )
+      writeTestAntigravitySummariesDb(
+        path.join(homeDir, '.gemini', 'antigravity', 'conversation_summaries.db'),
+        [
+          {
+            conversation_id: '228134bd-main',
+            title: '',
+            workspace_uris: '[]',
+            last_modified_time: new Date(now - 5_000).toISOString(),
+            parent_conversation_id: '',
+            nesting_depth: 0
+          }
+        ]
+      )
+
+      // History tail entry for a brand-new turn-1 conversation before conversation_summaries.db flushes
+      const agCliDir = path.join(homeDir, '.gemini', 'antigravity-cli')
+      fs.writeFileSync(
+        path.join(agCliDir, 'history.jsonl'),
+        `${JSON.stringify({
+          timestamp: now - 8_000,
+          workspace: wtPath,
+          display: '請幫我檢查 release-1.0 設定'
+        })}\n`,
+        'utf8'
+      )
+
+      const writeAgTranscript = (
+        convId: string,
+        prompt: string,
+        createdMs: number,
+        inTok: number,
+        outTok: number
+      ) => {
+        const logDir = path.join(agCliDir, 'brain', convId, '.system_generated', 'logs')
+        fs.mkdirSync(logDir, { recursive: true })
+        const p = path.join(logDir, 'transcript.jsonl')
+        fs.writeFileSync(
+          p,
+          [
+            JSON.stringify({
+              step_index: 0,
+              type: 'USER_INPUT',
+              created_at: new Date(createdMs).toISOString(),
+              content: `<USER_REQUEST>${prompt}</USER_REQUEST>`
+            }),
+            JSON.stringify({
+              step_index: 1,
+              type: 'PLANNER_RESPONSE',
+              status: 'IN_PROGRESS',
+              created_at: new Date(createdMs + 3_000).toISOString(),
+              model: 'gemini-4-carbon',
+              input_tokens: inTok,
+              output_tokens: outTok,
+              cache_read_tokens: 1000
+            })
+          ].join('\n') + '\n',
+          'utf8'
+        )
+        const mtimeSec = (createdMs + 4_000) / 1000
+        fs.utimesSync(p, mtimeSec, mtimeSec)
+      }
+
+      writeAgTranscript(
+        '228134bd-main',
+        '请你看一下issue #54 我沒有看懂他講的是什麼意思。需求是什麼？',
+        now - 60_000,
+        4000,
+        500
+      )
+      writeAgTranscript('sub-brain-99', 'Audit child task', now - 40_000, 2000, 300)
+      writeAgTranscript('turn1-history-only', '請幫我檢查 release-1.0 設定', now - 7_500, 1000, 100)
+
+      const scanner = new TranscriptScanner({ homeDir, orcaAppDirs: [orcaDir] })
+      scanner.setKnownWorkspacePaths([wtPath])
+      const sessions = scanner.scan({ forceFullDiscovery: true, now })
+      const journal = scanner.getJournalIndex()
+
+      const snap = buildDashboardSnapshot(
+        sessions,
+        journal,
+        new PricingEngine(),
+        {
+          focusedId: wtId,
+          focusedProject: 'qbibotlive',
+          focusedName: 'release-1.0',
+          focusedBranch: 'release-1.0',
+          focusedPath: wtPath,
+          knownWorkspaces: [
+            {
+              id: wtId,
+              project: 'qbibotlive',
+              name: 'release-1.0',
+              path: wtPath,
+              branch: 'refs/heads/release-1.0'
+            }
+          ],
+          liveAgents: [
+            {
+              terminalId: ptyId,
+              title: 'Terminal 1',
+              agent: 'antigravity',
+              state: 'working',
+              stateStartedAt: now - 10_000
+            }
+          ]
+        },
+        now
+      )
+
+      // Must NOT split into an unbound `Terminal 1` (0 tok) card + `local` card!
+      assert.ok(
+        !snap.live.agents.some((a) => a.title === 'Terminal 1' && a.tokens.total === 0),
+        'Active terminal PTY must bind to #54 Antigravity CLI transcript without leaving a 0-tok phantom card'
+      )
+      const card54 = snap.live.agents.find((a) => a.sessionKey === 'antigravity:228134bd-main')
+      assert.ok(card54, 'Expected #54 session card in Live Monitor')
+      assert.equal(card54.title, '#54')
+      assert.equal(card54.projectName, 'qbibotlive')
+      assert.equal(card54.workspaceName, 'release-1.0')
+      assert.equal(card54.tokens.total, 5500)
+
+      // Subagent must be excluded from user sessions/live cards, yet included in worktree period token totals
+      assert.ok(!snap.sessions.some((s) => s.sessionId === 'sub-brain-99'))
+      assert.ok(!snap.live.agents.some((a) => a.sessionKey.includes('sub-brain-99')))
+      assert.equal(snap.periods.worktree.day.tokens.total, 5500 + 3300 + 2100)
+
+      // Turn-1 session without summary DB row resolves worktree via history.jsonl
+      const turn1Row = snap.sessions.find((s) => s.sessionId === 'turn1-history-only')
+      assert.ok(turn1Row, 'Expected turn-1 history-matched session in focused worktree sessions')
+      assert.equal(turn1Row.workspaceName, 'release-1.0')
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('synchronizes Chat UI -> Terminal handoff generatedTitle, filters boilerplate handoff generatedTitle, and updates on customTitle rename', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-handoff-title-'))
+    try {
+      const homeDir = path.join(tmpRoot, 'home')
+      const orcaDir = path.join(tmpRoot, 'orca')
+      const wtA = path.join(tmpRoot, 'ws', 'proj-a')
+      const wtB = path.join(tmpRoot, 'ws', 'proj-b')
+      fs.mkdirSync(wtA, { recursive: true })
+      fs.mkdirSync(wtB, { recursive: true })
+
+      const wtIdA = `repo-a::${wtA}`
+      const wtIdB = `repo-b::${wtB}`
+      const ptyA = `${wtIdA}@@ptyA`
+      const ptyB = `${wtIdB}@@ptyB`
+      const now = Date.UTC(2026, 10, 13, 1, 35, 0)
+      const profileDbPath = path.join(orcaDir, 'profiles', 'local-default', 'profile-state.db')
+
+      writeTestProfileStateParts(profileDbPath, [
+        {
+          key: `["tabsByWorktree",${JSON.stringify(wtIdA)}]`,
+          payload: [
+            {
+              id: 'tab-handoff-a',
+              ptyId: ptyA,
+              worktreeId: wtIdA,
+              title: 'agy',
+              defaultTitle: 'Terminal 1',
+              customTitle: null,
+              generatedTitle: 'Token 流速圖表 UI/UX 重新設計',
+              launchAgent: 'antigravity',
+              createdAt: now - 90_000
+            }
+          ]
+        },
+        {
+          key: `["tabsByWorktree",${JSON.stringify(wtIdB)}]`,
+          payload: [
+            {
+              id: 'tab-handoff-b',
+              ptyId: ptyB,
+              worktreeId: wtIdB,
+              title: 'agy',
+              defaultTitle: 'Terminal 1',
+              customTitle: null,
+              generatedTitle: 'Continue work from the prior Orca',
+              launchAgent: 'claude',
+              createdAt: now - 90_000
+            }
+          ]
+        }
+      ])
+
+      const sHandoffA = createEmptySessionState('handoff-a', 'antigravity', '/tmp/handoff-a.jsonl')
+      sHandoffA.cwd = wtA
+      applyAntigravityLines(sHandoffA, [
+        JSON.stringify({
+          step_index: 0,
+          type: 'USER_INPUT',
+          created_at: new Date(now - 85_000).toISOString(),
+          content:
+            'Continue work from the prior Orca session.\nSession: #debug 2\n\nNew instructions: redesign chart'
+        }),
+        JSON.stringify({
+          step_index: 1,
+          type: 'PLANNER_RESPONSE',
+          status: 'IN_PROGRESS',
+          created_at: new Date(now - 10_000).toISOString(),
+          model: 'gemini-4-carbon',
+          input_tokens: 1200,
+          output_tokens: 300
+        })
+      ])
+
+      const sHandoffB = createEmptySessionState('handoff-b', 'claude', '/tmp/handoff-b.jsonl')
+      sHandoffB.cwd = wtB
+      applyClaudeLines(sHandoffB, [
+        JSON.stringify({
+          type: 'user',
+          timestamp: new Date(now - 80_000).toISOString(),
+          cwd: wtB,
+          message: {
+            content:
+              'Continue work from the prior Orca session.\nSession: 真實交接摘要標題\n\nPlease finish tests.'
+          }
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: new Date(now - 8_000).toISOString(),
+          message: {
+            id: 'msg-b1',
+            model: 'claude-sonnet-4-6',
+            stop_reason: 'tool_use',
+            usage: { input_tokens: 800, output_tokens: 200 }
+          }
+        })
+      ])
+
+      const journal1 = readOrcaJournalIndex([orcaDir], homeDir)
+      const snap1 = buildDashboardSnapshot(
+        [sHandoffA, sHandoffB],
+        journal1,
+        new PricingEngine(),
+        {
+          focusedName: null,
+          focusedBranch: null,
+          focusedPath: null,
+          liveAgents: [
+            {
+              terminalId: ptyA,
+              title: 'agy',
+              agent: 'antigravity',
+              state: 'working',
+              stateStartedAt: now - 10_000
+            },
+            {
+              terminalId: ptyB,
+              title: 'claude',
+              agent: 'claude',
+              state: 'working',
+              stateStartedAt: now - 8_000
+            }
+          ]
+        },
+        now
+      )
+
+      const cardA1 = snap1.live.agents.find((a) => a.sessionKey === 'antigravity:handoff-a')
+      const cardB1 = snap1.live.agents.find((a) => a.sessionKey === 'claude:handoff-b')
+      assert.equal(cardA1?.title, 'Token 流速圖表 UI/UX 重新設計')
+      assert.equal(
+        cardB1?.title,
+        '真實交接摘要標題',
+        'Boilerplate "Continue work from the prior Orca" generatedTitle must fall through to real session summary'
+      )
+
+      // User renames Tab A to `# handoff-fix` -> customTitle supersedes generatedTitle
+      writeTestProfileStateParts(profileDbPath, [
+        {
+          key: `["tabsByWorktree",${JSON.stringify(wtIdA)}]`,
+          payload: [
+            {
+              id: 'tab-handoff-a',
+              ptyId: ptyA,
+              worktreeId: wtIdA,
+              title: 'agy',
+              defaultTitle: 'Terminal 1',
+              customTitle: '# handoff-fix',
+              generatedTitle: 'Token 流速圖表 UI/UX 重新設計',
+              launchAgent: 'antigravity',
+              createdAt: now - 90_000
+            }
+          ]
+        }
+      ])
+
+      const journal2 = readOrcaJournalIndex([orcaDir], homeDir)
+      const snap2 = buildDashboardSnapshot(
+        [sHandoffA, sHandoffB],
+        journal2,
+        new PricingEngine(),
+        {
+          focusedName: null,
+          focusedBranch: null,
+          focusedPath: null,
+          liveAgents: [
+            {
+              terminalId: ptyA,
+              title: 'agy',
+              agent: 'antigravity',
+              state: 'working',
+              stateStartedAt: now - 10_000
+            }
+          ]
+        },
+        now
+      )
+      const cardA2 = snap2.live.agents.find((a) => a.sessionKey === 'antigravity:handoff-a')
+      assert.equal(cardA2?.title, '# handoff-fix')
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('shows rawTabLabel ("Terminal 1") on 0-tok unrenamed terminal when la.title is "agy", then transitions to summary and resolves terminal: livePoll key', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-plain-term-'))
+    try {
+      const homeDir = path.join(tmpRoot, 'home')
+      const orcaDir = path.join(tmpRoot, 'orca')
+      const wtPath = path.join(tmpRoot, 'ws', 'plain-repo')
+      fs.mkdirSync(wtPath, { recursive: true })
+
+      const wtId = `repo-plain::${wtPath}`
+      const ptyId = `${wtId}@@pty-plain`
+      const now = Date.UTC(2026, 10, 13, 1, 40, 0)
+
+      writeTestProfileStateParts(path.join(orcaDir, 'profiles', 'local-default', 'profile-state.db'), [
+        {
+          key: `["tabsByWorktree",${JSON.stringify(wtId)}]`,
+          payload: [
+            {
+              id: 'tab-plain',
+              ptyId,
+              worktreeId: wtId,
+              title: 'Terminal 1',
+              defaultTitle: 'Terminal 1',
+              customTitle: null,
+              generatedTitle: null,
+              launchAgent: 'antigravity',
+              createdAt: now - 30_000
+            }
+          ]
+        }
+      ])
+
+      const journal = readOrcaJournalIndex([orcaDir], homeDir)
+      const runtime = {
+        focusedId: wtId,
+        focusedProject: 'plain-repo',
+        focusedName: 'main',
+        focusedBranch: 'main',
+        focusedPath: wtPath,
+        liveAgents: [
+          {
+            terminalId: ptyId,
+            title: 'agy',
+            agent: 'antigravity',
+            state: 'working' as const,
+            stateStartedAt: now - 5_000
+          }
+        ]
+      }
+
+      // 0-tok state before any conversation turn exists
+      const snap0 = buildDashboardSnapshot([], journal, new PricingEngine(), runtime, now)
+      assert.equal(snap0.live.agents.length, 1)
+      assert.equal(snap0.live.agents[0].title, 'Terminal 1')
+      assert.equal(snap0.live.agents[0].sessionKey, `terminal:${ptyId}`)
+
+      // First turn arrives -> transitions from "Terminal 1" to conversation summary, and terminal:<ptyId> livePoll still resolves it
+      const sTurn1 = createEmptySessionState('plain-conv-1', 'antigravity', '/tmp/plain-conv-1.jsonl')
+      sTurn1.cwd = wtPath
+      sTurn1.titleHint = '修正 Terminal 標題同步問題'
+      sTurn1.createdAtMs = now - 25_000
+      sTurn1.updatedAtMs = now - 2_000
+      sTurn1.lastMtimeMs = now - 2_000
+      sTurn1.lastEventState = 'working'
+      sTurn1.turnsByKey.set('t1', {
+        turnKey: 't1',
+        timestampMs: now - 2_000,
+        input: 900,
+        output: 180,
+        reasoning: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 1080,
+        durationSec: 3,
+        tps: 60,
+        model: 'gemini-4-carbon',
+        explicitCostUsd: null
+      })
+
+      const snap1 = buildDashboardSnapshot([sTurn1], journal, new PricingEngine(), runtime, now)
+      assert.equal(snap1.live.agents.length, 1)
+      assert.equal(snap1.live.agents[0].title, '修正 Terminal 標題同步問題')
+
+      const polledViaTerminalKey = pollSingleLiveAgent(
+        `terminal:${ptyId}`,
+        [sTurn1],
+        journal,
+        new PricingEngine(),
+        runtime,
+        now
+      )
+      assert.ok(polledViaTerminalKey, 'pollSingleLiveAgent must seamlessly transition terminal:<ptyId> key')
+      assert.equal(polledViaTerminalKey.sessionKey, 'antigravity:plain-conv-1')
+      assert.equal(polledViaTerminalKey.title, '修正 Terminal 標題同步問題')
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('isolates parallel same-agent terminal tabs in one worktree regardless of lastFocusedAt and hands tab title forward across sequential sessions in one tab', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-multi-seq-term-'))
+    try {
+      const homeDir = path.join(tmpRoot, 'home')
+      const orcaDir = path.join(tmpRoot, 'orca')
+      const wtParallel = path.join(tmpRoot, 'ws', 'parallel-repo')
+      const wtSeq = path.join(tmpRoot, 'ws', 'seq-repo')
+      fs.mkdirSync(wtParallel, { recursive: true })
+      fs.mkdirSync(wtSeq, { recursive: true })
+
+      const wtIdPar = `repo-par::${wtParallel}`
+      const wtIdSeq = `repo-seq::${wtSeq}`
+      const now = Date.UTC(2026, 10, 13, 1, 45, 0)
+
+      writeTestProfileStateParts(path.join(orcaDir, 'profiles', 'local-default', 'profile-state.db'), [
+        {
+          key: `["tabsByWorktree",${JSON.stringify(wtIdPar)}]`,
+          payload: [
+            {
+              id: 'tab-par-1',
+              ptyId: `${wtIdPar}@@pty1`,
+              worktreeId: wtIdPar,
+              title: 'agy',
+              defaultTitle: 'Terminal 1',
+              customTitle: '# tab-1',
+              launchAgent: 'antigravity',
+              createdAt: now - 120_000
+            },
+            {
+              id: 'tab-par-2',
+              ptyId: `${wtIdPar}@@pty2`,
+              worktreeId: wtIdPar,
+              title: 'agy',
+              defaultTitle: 'Terminal 2',
+              customTitle: '# tab-2',
+              launchAgent: 'antigravity',
+              createdAt: now - 60_000
+            }
+          ]
+        },
+        {
+          key: `["unifiedTabs",${JSON.stringify(wtIdPar)}]`,
+          payload: [
+            {
+              id: 'tab-par-1',
+              contentType: 'terminal',
+              entityId: `${wtIdPar}@@pty1`,
+              worktreeId: wtIdPar,
+              customLabel: '# tab-1',
+              // Tab 1 was refocused MORE recently than Tab 2 — must NOT steal Tab 2's session!
+              lastFocusedAt: now - 1_000
+            },
+            {
+              id: 'tab-par-2',
+              contentType: 'terminal',
+              entityId: `${wtIdPar}@@pty2`,
+              worktreeId: wtIdPar,
+              customLabel: '# tab-2',
+              lastFocusedAt: now - 50_000
+            }
+          ]
+        },
+        {
+          key: `["tabsByWorktree",${JSON.stringify(wtIdSeq)}]`,
+          payload: [
+            {
+              id: 'tab-seq-only',
+              ptyId: `${wtIdSeq}@@pty-seq`,
+              worktreeId: wtIdSeq,
+              title: 'agy',
+              defaultTitle: 'Terminal 1',
+              customTitle: '# single-tab',
+              launchAgent: 'antigravity',
+              createdAt: now - 180_000
+            }
+          ]
+        },
+        {
+          key: `["unifiedTabs",${JSON.stringify(wtIdSeq)}]`,
+          payload: [
+            {
+              id: 'tab-seq-only',
+              contentType: 'terminal',
+              entityId: `${wtIdSeq}@@pty-seq`,
+              worktreeId: wtIdSeq,
+              customLabel: '# single-tab',
+              lastFocusedAt: now - 2_000
+            }
+          ]
+        }
+      ])
+
+      const makeSession = (
+        id: string,
+        cwd: string,
+        hint: string,
+        createdAtMs: number,
+        updatedAtMs: number,
+        done = false
+      ) => {
+        const s = createEmptySessionState(id, 'antigravity', `/tmp/${id}.jsonl`)
+        s.cwd = cwd
+        s.titleHint = hint
+        s.createdAtMs = createdAtMs
+        s.updatedAtMs = updatedAtMs
+        s.lastMtimeMs = updatedAtMs
+        s.lastEventState = done ? 'done' : 'working'
+        s.turnsByKey.set('t1', {
+          turnKey: 't1',
+          timestampMs: updatedAtMs,
+          input: 500,
+          output: 100,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 600,
+          durationSec: 2,
+          tps: 50,
+          model: 'gemini-4-carbon',
+          explicitCostUsd: null
+        })
+        return s
+      }
+
+      const sPar1 = makeSession('par-s1', wtParallel, 'Parallel prompt 1', now - 118_000, now - 90_000)
+      const sPar2 = makeSession('par-s2', wtParallel, 'Parallel prompt 2', now - 58_000, now - 10_000)
+      const sSeqOld = makeSession('seq-old', wtSeq, '第一輪舊任務', now - 175_000, now - 120_000, true)
+      const sSeqNew = makeSession('seq-new', wtSeq, '第二輪新任務', now - 40_000, now - 5_000, false)
+
+      const journal = readOrcaJournalIndex([orcaDir], homeDir)
+      const snapPar = buildDashboardSnapshot(
+        [sPar1, sPar2],
+        journal,
+        new PricingEngine(),
+        { focusedName: 'main', focusedBranch: 'main', focusedPath: wtParallel, liveAgents: [] },
+        now
+      )
+      assert.equal(snapPar.sessions.find((s) => s.sessionId === 'par-s1')?.title, '# tab-1')
+      assert.equal(snapPar.sessions.find((s) => s.sessionId === 'par-s2')?.title, '# tab-2')
+
+      const snapSeq = buildDashboardSnapshot(
+        [sSeqOld, sSeqNew],
+        journal,
+        new PricingEngine(),
+        { focusedName: 'main', focusedBranch: 'main', focusedPath: wtSeq, liveAgents: [] },
+        now
+      )
+      assert.equal(
+        snapSeq.sessions.find((s) => s.sessionId === 'seq-new')?.title,
+        '# single-tab',
+        'Active second CLI session in the same terminal tab must inherit the tab title'
+      )
+      assert.equal(
+        snapSeq.sessions.find((s) => s.sessionId === 'seq-old')?.title,
+        '第一輪舊任務',
+        'Exited first CLI session in the same terminal tab must revert to its conversation summary'
+      )
+
+      // Part C: An older renamed tab (`# tab-1` at t0, 0 turns) must NOT steal a session spawned in a newer unrenamed `Terminal 2` (t0 + 60s)
+      const wtMixed = path.join(tmpRoot, 'ws', 'mixed-repo')
+      fs.mkdirSync(wtMixed, { recursive: true })
+      const wtIdMixed = `repo-mix::${wtMixed}`
+      const mixedProfileDb = path.join(orcaDir, 'profiles', 'local-default', 'profile-state.db')
+      writeTestProfileStateParts(mixedProfileDb, [
+        {
+          key: `["tabsByWorktree",${JSON.stringify(wtIdMixed)}]`,
+          payload: [
+            {
+              id: 'tab-mix-1',
+              ptyId: `${wtIdMixed}@@pty-m1`,
+              worktreeId: wtIdMixed,
+              title: 'Terminal 1',
+              defaultTitle: 'Terminal 1',
+              customTitle: '# idle-renamed-tab',
+              launchAgent: 'antigravity',
+              createdAt: now - 120_000
+            },
+            {
+              id: 'tab-mix-2',
+              ptyId: `${wtIdMixed}@@pty-m2`,
+              worktreeId: wtIdMixed,
+              title: 'Terminal 2',
+              defaultTitle: 'Terminal 2',
+              customTitle: null,
+              generatedTitle: null,
+              launchAgent: 'antigravity',
+              createdAt: now - 60_000
+            }
+          ]
+        }
+      ])
+      const sMix2 = makeSession(
+        'mix-s2',
+        wtMixed,
+        'Unrenamed tab 2 prompt',
+        now - 58_000,
+        now - 5_000,
+        false
+      )
+      const journalMixed = readOrcaJournalIndex([orcaDir], homeDir)
+      const snapMixed = buildDashboardSnapshot(
+        [sMix2],
+        journalMixed,
+        new PricingEngine(),
+        { focusedName: 'main', focusedBranch: 'main', focusedPath: wtMixed, liveAgents: [] },
+        now
+      )
+      assert.equal(
+        snapMixed.sessions.find((s) => s.sessionId === 'mix-s2')?.title,
+        'Unrenamed tab 2 prompt',
+        'Older renamed 0-turn tab must not steal session spawned inside newer unrenamed Terminal 2'
+      )
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('hydrates late conversation_summaries.db flush on unchanged transcript during pollHotFiles and distinguishes Claude /rename cliCustomTitle', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-late-flush-'))
+    try {
+      const homeDir = path.join(tmpRoot, 'home')
+      const orcaDir = path.join(tmpRoot, 'orca')
+      const wtPath = path.join(tmpRoot, 'ws', 'late-repo')
+      fs.mkdirSync(wtPath, { recursive: true })
+      const now = Date.UTC(2026, 10, 13, 1, 50, 0)
+
+      const logDir = path.join(
+        homeDir,
+        '.gemini',
+        'antigravity-cli',
+        'brain',
+        'late-conv',
+        '.system_generated',
+        'logs'
+      )
+      fs.mkdirSync(logDir, { recursive: true })
+      const transcriptPath = path.join(logDir, 'transcript.jsonl')
+      fs.writeFileSync(
+        transcriptPath,
+        [
+          JSON.stringify({
+            step_index: 0,
+            type: 'USER_INPUT',
+            created_at: new Date(now - 10_000).toISOString(),
+            content: '<USER_REQUEST>Initial prompt before DB flush</USER_REQUEST>'
+          }),
+          JSON.stringify({
+            step_index: 1,
+            type: 'PLANNER_RESPONSE',
+            status: 'IN_PROGRESS',
+            created_at: new Date(now - 5_000).toISOString(),
+            model: 'gemini-4-carbon',
+            input_tokens: 600,
+            output_tokens: 120
+          })
+        ].join('\n') + '\n',
+        'utf8'
+      )
+
+      const scanner = new TranscriptScanner({ homeDir, orcaAppDirs: [orcaDir] })
+      const initial = scanner.scan({ forceFullDiscovery: true, now })
+      assert.equal(initial.length, 1)
+      assert.equal(initial[0].cwd, null)
+
+      // Now conversation_summaries.db flushes WITHOUT any new bytes written to transcript.jsonl!
+      writeTestAntigravitySummariesDb(
+        path.join(homeDir, '.gemini', 'antigravity-cli', 'conversation_summaries.db'),
+        [
+          {
+            conversation_id: 'late-conv',
+            title: 'Late Flushed Summary',
+            workspace_uris: JSON.stringify([`file://${wtPath}`]),
+            last_modified_time: new Date(now - 1_000).toISOString()
+          }
+        ]
+      )
+
+      scanner.refreshJournal(now + 1_000, 0)
+      const afterHotPoll = scanner.pollHotFiles(now + 1_000, 'antigravity:late-conv')
+      assert.equal(afterHotPoll[0].cwd, wtPath)
+
+      // Verify Claude /rename cliCustomTitle beats stale journal title when no terminal tab override exists
+      const sClaude = createEmptySessionState('claude-renamed', 'claude', '/tmp/claude-renamed.jsonl')
+      applyClaudeLines(sClaude, [
+        JSON.stringify({
+          type: 'user',
+          timestamp: new Date(now - 20_000).toISOString(),
+          cwd: wtPath,
+          customTitle: '/rename 後的新名稱',
+          message: { content: 'Old prompt text' }
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: new Date(now - 15_000).toISOString(),
+          message: {
+            id: 'm1',
+            model: 'claude-sonnet-4-6',
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 500, output_tokens: 100 }
+          }
+        })
+      ])
+
+      const snapClaude = buildDashboardSnapshot(
+        [sClaude],
+        createTestJournalIndex({
+          byNativeId: new Map([
+            [
+              'claude-renamed',
+              {
+                orcaSessionId: 'orca-c1',
+                nativeId: 'claude-renamed',
+                provider: 'claude',
+                title: '舊的 Journal 標題',
+                workspacePath: wtPath,
+                model: 'claude-sonnet-4-6',
+                updatedAt: now - 20_000,
+                isLiveLease: false,
+                isTurnOpen: false,
+                lastTurnState: 'settled'
+              }
+            ]
+          ])
+        }),
+        new PricingEngine(),
+        { focusedName: 'late-repo', focusedBranch: 'main', focusedPath: wtPath, liveAgents: [] },
+        now
+      )
+      assert.equal(snapClaude.sessions[0]?.title, '/rename 後的新名稱')
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('refreshes terminal tab rename via worker workspace.changed settle pass and preserves live agent workspacePath across short terminalIds', async () => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-worker-rename-'))
+    try {
+      const orcaDir = path.join(tmpHome, 'orca-data')
+      const profileDbPath = path.join(orcaDir, 'profiles', 'local-default', 'profile-state.db')
+      const wtPath = path.join(tmpHome, 'workspaces', 'token-pulse-repo')
+      const otherWtPath = path.join(tmpHome, 'workspaces', 'other-repo')
+      fs.mkdirSync(wtPath, { recursive: true })
+      fs.mkdirSync(otherWtPath, { recursive: true })
+      fs.mkdirSync(path.dirname(profileDbPath), { recursive: true })
+      fs.writeFileSync(
+        path.join(orcaDir, 'orca-profile-index.json'),
+        JSON.stringify({ schemaVersion: 1, activeProfileId: 'local-default' }),
+        'utf8'
+      )
+
+      const wtId = `repo-tp::${wtPath}`
+      const shortTabId = 'tab-short-pty'
+      const now = Date.now()
+
+      const setTabCustomTitle = (customTitle: string) => {
+        writeTestProfileStateParts(profileDbPath, [
+          { key: '["activeWorktreeId"]', payload: wtId },
+          {
+            key: `["tabsByWorktree",${JSON.stringify(wtId)}]`,
+            payload: [
+              {
+                id: shortTabId,
+                ptyId: shortTabId,
+                worktreeId: wtId,
+                title: 'agy',
+                defaultTitle: 'Terminal 1',
+                customTitle,
+                launchAgent: 'antigravity',
+                createdAt: now - 60_000
+              }
+            ]
+          }
+        ])
+      }
+
+      setTabCustomTitle('# initial-tab')
+
+      writeTestAntigravitySummariesDb(
+        path.join(tmpHome, '.gemini', 'antigravity-cli', 'conversation_summaries.db'),
+        [
+          {
+            conversation_id: 'live-rename-conv',
+            title: 'Summary Fallback',
+            workspace_uris: JSON.stringify([`file://${wtPath}`]),
+            last_modified_time: new Date(now - 5_000).toISOString()
+          },
+          {
+            conversation_id: 'other-newer-conv',
+            title: 'Other Repo Task',
+            workspace_uris: JSON.stringify([`file://${otherWtPath}`]),
+            last_modified_time: new Date(now - 1_000).toISOString()
+          }
+        ]
+      )
+      const writeConv = (id: string, createdOffsetMs: number) => {
+        const logDir = path.join(
+          tmpHome,
+          '.gemini',
+          'antigravity-cli',
+          'brain',
+          id,
+          '.system_generated',
+          'logs'
+        )
+        fs.mkdirSync(logDir, { recursive: true })
+        fs.writeFileSync(
+          path.join(logDir, 'transcript.jsonl'),
+          [
+            JSON.stringify({
+              step_index: 0,
+              type: 'USER_INPUT',
+              created_at: new Date(now - 20_000).toISOString(),
+              content: `<USER_REQUEST>Task ${id}</USER_REQUEST>`
+            }),
+            JSON.stringify({
+              step_index: 1,
+              type: 'PLANNER_RESPONSE',
+              status: 'IN_PROGRESS',
+              created_at: new Date(now - createdOffsetMs).toISOString(),
+              model: 'gemini-4-carbon',
+              input_tokens: 1000,
+              output_tokens: 250
+            })
+          ].join('\n') + '\n',
+          'utf8'
+        )
+      }
+      writeConv('live-rename-conv', 4_000)
+      writeConv('other-newer-conv', 1_000)
+
+      process.env.TOKEN_PULSE_HOME_DIR = tmpHome
+      process.env.TOKEN_PULSE_ORCA_DATA_DIR = orcaDir
+
+      const host = mockHost({
+        settings: { pricingSyncHours: 6, livePollSeconds: 10 },
+        results: {
+          'workspace.list': () => ({
+            workspaces: [
+              {
+                id: wtId,
+                kind: 'worktree',
+                name: 'main',
+                project: 'token-pulse-repo',
+                path: wtPath,
+                branch: 'refs/heads/main',
+                hostId: 'local'
+              }
+            ],
+            truncated: false
+          }),
+          'workspace.readContext': () => ({
+            branch: 'refs/heads/main',
+            displayName: 'main',
+            terminals: [{ id: shortTabId, title: 'agy' }]
+          }),
+          'agents.list': () => ({
+            agents: [
+              {
+                terminalId: shortTabId,
+                title: 'agy',
+                agent: 'antigravity',
+                state: 'working',
+                stateStartedAt: now - 3_000
+              }
+            ]
+          }),
+          'statusBar.update': () => ({ ok: true })
+        }
+      })
+
+      const worker = await mountWorker(workerModule, { host })
+      try {
+        await worker.emit('agent.status.changed', {
+          workspaceId: wtId,
+          paneKey: 'pane-1',
+          terminalId: shortTabId,
+          state: 'working',
+          title: 'agy',
+          receivedAt: Date.now()
+        })
+
+        const snapBefore = await worker.request('dashboard.get', { forceScan: true })
+        const cardBefore = snapBefore.live.agents.find(
+          (a) => a.sessionKey === 'antigravity:live-rename-conv'
+        )
+        assert.equal(cardBefore?.title, '# initial-tab')
+        assert.equal(cardBefore?.workspaceName, 'main')
+
+        // Simulate debounced Orca tab rename flushing into profile-state.db 350ms after workspace.changed fires
+        const postsBefore = worker.posts.length
+        await worker.emit('workspace.changed', {
+          context: {
+            branch: 'refs/heads/main',
+            displayName: 'main',
+            terminals: [{ id: shortTabId, title: 'agy' }]
+          }
+        })
+        setTimeout(() => {
+          setTabCustomTitle('# renamed-live')
+        }, 350)
+
+        await new Promise((resolve) => setTimeout(resolve, 1100))
+
+        // Must have pushed a post-flush `dashboard.updated` event automatically without requiring a panel RPC
+        const pushedSnapshots = worker.posts
+          .slice(postsBefore)
+          .filter((p) => p.event === 'dashboard.updated')
+          .map((p) => p.payload as import('./protocol').DashboardSnapshot)
+        const latestPushedCard = pushedSnapshots[pushedSnapshots.length - 1]?.live.agents.find(
+          (a) => a.sessionKey === 'antigravity:live-rename-conv'
+        )
+        assert.equal(latestPushedCard?.title, '# renamed-live')
+
+        const pollAfter = await worker.request('agent.livePoll', {
+          sessionKey: 'antigravity:live-rename-conv'
+        })
+        assert.equal(pollAfter.agent?.title, '# renamed-live')
+        assert.deepEqual(worker.refusals, [])
+      } finally {
+        await worker.deactivate()
+        delete process.env.TOKEN_PULSE_HOME_DIR
+        delete process.env.TOKEN_PULSE_ORCA_DATA_DIR
+      }
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true, force: true })
+    }
+  })
+
+  test('publish-plugin.sh dirty-worktree allowlist accepts *-plan.md without staging plan files into release commits', () => {
+    const scriptPath = path.resolve(import.meta.dirname, '..', 'scripts', 'publish-plugin.sh')
+    const scriptText = fs.readFileSync(scriptPath, 'utf8')
+    const caseBlockMatch = scriptText.match(
+      /while IFS= read -r line; do[\s\S]*?done < <\(git status --porcelain\)/
+    )
+    assert.ok(caseBlockMatch, 'Expected git status --porcelain guard loop in publish-plugin.sh')
+    const loopBody = caseBlockMatch[0].replace(
+      'done < <(git status --porcelain)',
+      'done <<< "$MOCK_PORCELAIN"'
+    )
+
+    // Positive check: *-plan.md and src/* pass cleanly
+    execFileSync('bash', ['-euo', 'pipefail', '-c', loopBody], {
+      env: {
+        ...process.env,
+        MOCK_PORCELAIN: '?? terminal-tab-title-sync-plan.md\n M src/journal.ts'
+      }
+    })
+
+    // Negative control: unexpected file fails closed with exit code 1
+    assert.throws(() => {
+      execFileSync('bash', ['-euo', 'pipefail', '-c', loopBody], {
+        env: { ...process.env, MOCK_PORCELAIN: '?? unexpected-scratch.tmp' },
+        stdio: 'pipe'
+      })
+    })
+
+    // Ensure release staging `git add` never stages arbitrary *-plan.md files
+    const gitAddLine = scriptText
+      .split('\n')
+      .find((line) => line.trim().startsWith('git add -A --'))
+    assert.ok(gitAddLine, 'Expected git add release line in publish-plugin.sh')
+    assert.ok(!gitAddLine.includes('*-plan.md'))
   })
 })
