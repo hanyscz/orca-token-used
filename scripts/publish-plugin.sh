@@ -135,7 +135,10 @@ git push origin main
 git tag -a "$TAG" -m "$TAG"
 git push origin "$TAG"
 
+CONTENT_HASH="$(orca plugin release-entry . --json | node -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8')); if(!d.ok){process.exit(1)} console.log(d.result.entry.contentHash)")"
+
 echo
-echo "Published $REPO $TAG"
-echo "Directory: https://www.onorca.dev/plugins/${REPO}"
+echo "Published $REPO $TAG (contentHash: $CONTENT_HASH)"
+echo "Directory: https://orca.dev/plugins/${REPO}"
 echo "Install:   orca plugin install ${REPO}@${TAG}"
+echo "Note:      stablyai/orca-community-plugins indexes public repos with topic 'orca-plugin' automatically (~20-30 min); no manual review PR needed."
