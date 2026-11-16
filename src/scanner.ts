@@ -17,7 +17,7 @@ import type { AgentKind } from './protocol'
 export interface ScannerOptions {
   homeDir?: string
   orcaAppDirs?: string[]
-  /** Lookback horizon in days; defaults to 35 days (covers Month + comparison delta) */
+  /** Lookback horizon in days; defaults to 65 days (covers Month + previous-month comparison) */
   lookbackDays?: number
 }
 
@@ -29,7 +29,7 @@ export interface DiscoveredFile {
   sizeBytes: number
 }
 
-export const HISTORICAL_CACHE_STORAGE_KEY = 'historicalSessions.v4'
+export const HISTORICAL_CACHE_STORAGE_KEY = 'historicalSessions.v6'
 
 export interface CachedFileSummary {
   sessionId: string
@@ -42,6 +42,10 @@ export interface CachedFileSummary {
   titleHint: string | null
   isInternalHelper: boolean
   isSubagent?: boolean
+  parentSessionId?: string | null
+  parentMessageUuid?: string | null
+  messageUuids?: string[]
+  reasoningLevels?: string[]
   latestModel: string | null
   createdAtMs: number
   updatedAtMs: number
@@ -232,7 +236,7 @@ export class TranscriptScanner {
   constructor(options: ScannerOptions = {}) {
     this.homeDir = options.homeDir ?? (process.env.TOKEN_PULSE_HOME_DIR || os.homedir())
     this.orcaAppDirs = options.orcaAppDirs ?? defaultOrcaAppDataDirs(this.homeDir)
-    this.lookbackDays = options.lookbackDays ?? 35
+    this.lookbackDays = options.lookbackDays ?? 65
   }
 
   getOrcaAppDirs(): string[] {
@@ -276,6 +280,14 @@ export class TranscriptScanner {
       st.titleHint = item.titleHint
       st.isInternalHelper = Boolean(item.isInternalHelper)
       st.isSubagent = Boolean(item.isSubagent)
+      st.parentSessionId = item.parentSessionId ?? null
+      st.parentMessageUuid = item.parentMessageUuid ?? null
+      st.messageUuids = Array.isArray(item.messageUuids)
+        ? item.messageUuids.filter((uuid): uuid is string => typeof uuid === 'string')
+        : []
+      st.reasoningLevels = Array.isArray(item.reasoningLevels)
+        ? item.reasoningLevels.filter((level): level is string => typeof level === 'string')
+        : []
       st.latestModel = item.latestModel
       st.createdAtMs = item.createdAtMs
       st.updatedAtMs = item.updatedAtMs
@@ -399,6 +411,10 @@ export class TranscriptScanner {
         titleHint: st.titleHint,
         isInternalHelper: st.isInternalHelper,
         isSubagent: st.isSubagent,
+        parentSessionId: st.parentSessionId,
+        parentMessageUuid: st.parentMessageUuid,
+        messageUuids: st.messageUuids,
+        reasoningLevels: st.reasoningLevels,
         latestModel: st.latestModel,
         createdAtMs: st.createdAtMs,
         updatedAtMs: st.updatedAtMs,
@@ -426,6 +442,20 @@ export class TranscriptScanner {
   }
 
   private applyJournalSessionHints(now: number): void {
+    const claudeMessageOwners = new Map<string, string>()
+    for (const state of this.statesByFile.values()) {
+      if (state.agent !== 'claude') continue
+      for (const uuid of state.messageUuids) claudeMessageOwners.set(uuid, state.sessionId)
+    }
+    for (const state of this.statesByFile.values()) {
+      if (state.agent !== 'claude' || !state.parentMessageUuid || state.parentSessionId) continue
+      const parentId = claudeMessageOwners.get(state.parentMessageUuid)
+      if (parentId && parentId !== state.sessionId) {
+        state.parentSessionId = parentId
+        state.isSubagent = true
+      }
+    }
+
     const summaries = this.journalIndex.antigravitySummaries
     const histByConv = this.journalIndex.antigravityHistoryByConversationId
     const histEntries = this.journalIndex.antigravityHistoryEntries
@@ -485,6 +515,10 @@ export class TranscriptScanner {
 
       if (summary?.isSubagent && !state.isSubagent) {
         state.isSubagent = true
+        persistedFieldChanged = true
+      }
+      if (summary?.parentConversationId && state.parentSessionId !== summary.parentConversationId) {
+        state.parentSessionId = summary.parentConversationId
         persistedFieldChanged = true
       }
 

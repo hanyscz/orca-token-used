@@ -13,7 +13,8 @@ import {
 import {
   extractWorkspacePathFromId,
   type JournalIndex,
-  readOrcaActiveWorktreeSelection
+  readOrcaActiveWorktreeSelection,
+  readProfileStateTerminalToTabId
 } from './journal'
 import { formatTokens, formatUsd, getMessages } from './panel/i18n'
 import type { SessionTranscriptState } from './parsers'
@@ -27,9 +28,11 @@ const VALID_TABS: readonly ViewTab[] = ['live', 'sessions', 'day', 'week', 'mont
 let activeCleanup: (() => Promise<void>) | null = null
 
 interface ReadContextResult {
+  /** Host API 1.9+ includes the stable workspace id. Older Orca versions omit it. */
+  workspaceId?: string
   branch: string
   displayName: string
-  terminals: { id: string; title?: string }[]
+  terminals: { id: string; title?: string; tabId?: string; paneKey?: string }[]
 }
 
 export default async function activate(orca: OrcaWorkerApi): Promise<void> {
@@ -54,7 +57,50 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   let activeLiveAgentKey: string | null = null
 
   const terminalToWorkspacePath = new Map<string, string>()
+  const terminalToTabId = new Map<string, string>()
   let lastReadContext: ReadContextResult | null = null
+
+  function seedTerminalTabsFromProfileDb(): void {
+    try {
+      const fromDb = readProfileStateTerminalToTabId(scanner.getOrcaAppDirs())
+      for (const [k, v] of fromDb) {
+        if (!terminalToTabId.has(k)) {
+          terminalToTabId.set(k, v)
+        }
+      }
+    } catch {
+      // Ignore DB errors
+    }
+  }
+
+  function seedTerminalTabsFromJournal(journal: JournalIndex): void {
+    for (const t of journal.terminalTabs) {
+      if (t.tabId) {
+        if (!terminalToTabId.has(t.tabId)) terminalToTabId.set(t.tabId, t.tabId)
+        if (t.ptyId && !terminalToTabId.has(t.ptyId)) terminalToTabId.set(t.ptyId, t.tabId)
+      }
+    }
+  }
+
+  function seedTerminalsFromReadContext(ctx: ReadContextResult | null | undefined): void {
+    if (!ctx || !Array.isArray(ctx.terminals)) return
+    for (const term of ctx.terminals) {
+      const rawTerm = term as { id?: string; tabId?: string; paneKey?: string }
+      const termId = typeof rawTerm.id === 'string' ? rawTerm.id.trim() : ''
+      if (!termId) continue
+      const tabId =
+        typeof rawTerm.tabId === 'string' && rawTerm.tabId.trim()
+          ? rawTerm.tabId.trim()
+          : typeof rawTerm.paneKey === 'string' && rawTerm.paneKey.trim()
+            ? rawTerm.paneKey.includes(':')
+              ? rawTerm.paneKey.split(':')[0].trim()
+              : rawTerm.paneKey.trim()
+            : null
+      if (tabId) {
+        terminalToTabId.set(termId, tabId)
+      }
+    }
+  }
 
   const runtime: WorkspaceRuntimeContext = {
     focusedId: null,
@@ -108,10 +154,13 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     try {
       if (orca.host.has('workspace.readContext')) {
         lastReadContext = await orca.host.call('workspace.readContext', {})
+        seedTerminalsFromReadContext(lastReadContext)
       }
     } catch (err) {
       orca.log(`workspace.readContext failed: ${err instanceof Error ? err.message : String(err)}`)
     }
+
+    seedTerminalTabsFromProfileDb()
 
     try {
       if (orca.host.has('agents.list')) {
@@ -130,8 +179,26 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
               prev?.workspacePath ??
               null
             : null
+          const rawA = a as { tabId?: string | null; paneKey?: string | null }
+          const aTabId =
+            (typeof rawA.tabId === 'string' && rawA.tabId.trim()) ||
+            (typeof rawA.paneKey === 'string' && rawA.paneKey.trim()
+              ? rawA.paneKey.includes(':')
+                ? rawA.paneKey.split(':')[0].trim()
+                : rawA.paneKey.trim()
+              : null)
+          const tabId = a.terminalId
+            ? aTabId ??
+              terminalToTabId.get(a.terminalId) ??
+              prev?.tabId ??
+              null
+            : null
+          if (a.terminalId && tabId) {
+            terminalToTabId.set(a.terminalId, tabId)
+          }
           return {
             terminalId: a.terminalId,
+            tabId,
             title: a.title ?? prev?.title ?? null,
             agent: a.agent ?? prev?.agent ?? null,
             state: a.state,
@@ -152,6 +219,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     } catch (err) {
       orca.log(`agents.list failed: ${err instanceof Error ? err.message : String(err)}`)
     }
+
   }
 
   function resolveFocusedWorkspace(
@@ -159,8 +227,17 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     journal: JournalIndex,
     sessions: SessionTranscriptState[]
   ): void {
-    // 1) Read Orca's authoritative left-sidebar selection (`workspaceSession.activeWorktreeId`) from `profile-state.db`
-    const activeSel = readOrcaActiveWorktreeSelection(scanner.getOrcaAppDirs())
+    // 1) Prefer Orca's host-provided workspace id; use the profile DB only for older hosts.
+    const matchFromContextId = ctx?.workspaceId
+      ? workspaceListCache.find((w) => w.id === ctx.workspaceId)
+      : undefined
+    const activeSel = matchFromContextId
+      ? {
+          activeRepoId: null,
+          activeWorktreeId: null,
+          activeWorktreePath: null
+        }
+      : readOrcaActiveWorktreeSelection(scanner.getOrcaAppDirs())
 
     if (!ctx && !activeSel.activeWorktreeId) {
       runtime.focusedId = null
@@ -172,6 +249,17 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     }
 
     const cleanBranch = ctx ? stripGitRefPrefix(ctx.branch) : null
+
+    // Prefer Orca's stable workspace id when the host exposes it. The profile DB remains
+    // a compatibility fallback for older Orca versions that only return displayName/branch.
+    if (matchFromContextId) {
+      runtime.focusedId = matchFromContextId.id
+      runtime.focusedProject = matchFromContextId.project
+      runtime.focusedName = matchFromContextId.name
+      runtime.focusedBranch = stripGitRefPrefix(matchFromContextId.branch) ?? cleanBranch
+      runtime.focusedPath = matchFromContextId.path
+      return
+    }
 
     // 2) Focused workspace's own terminals from `workspace.readContext` (strictly scoped to focused worktree)
     let ctxTerminalPathHint: string | null = null
@@ -352,6 +440,8 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
       await refreshWorkspaceAndAgents(forceFullScan)
       const sessions = scanner.scan({ forceFullDiscovery: forceFullScan })
       const journal = scanner.getJournalIndex()
+      seedTerminalTabsFromJournal(journal)
+      seedTerminalTabsFromProfileDb()
       resolveFocusedWorkspace(lastReadContext, journal, sessions)
 
       const snap = buildDashboardSnapshot(sessions, journal, pricing, runtime, Date.now())
@@ -454,6 +544,28 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   )
 
   disposables.push(
+    orca.panels.handle('session.focus', async (input) => {
+      const terminalId = typeof input?.terminalId === 'string' ? input.terminalId.trim() : ''
+      const focusHost = orca.host as unknown as {
+        has(method: string): boolean
+        call(method: string, params: { terminalId: string }): Promise<unknown>
+      }
+      const knownTerminal =
+        runtime.liveAgents.some((agent) => agent.terminalId === terminalId) ||
+        Boolean(lastReadContext?.terminals.some((terminal) => terminal.id === terminalId))
+      if (!terminalId || terminalId.length > 512 || !knownTerminal || !focusHost.has('terminal.focus')) {
+        return { focused: false }
+      }
+      try {
+        await focusHost.call('terminal.focus', { terminalId })
+        return { focused: true }
+      } catch {
+        return { focused: false }
+      }
+    })
+  )
+
+  disposables.push(
     orca.panels.handle('pricing.refresh', async () => {
       await syncPricingAndPersist()
       await computeAndPublish(false)
@@ -525,6 +637,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     orca.events.on('workspace.changed', async ({ context }) => {
       if (context) {
         lastReadContext = context
+        seedTerminalsFromReadContext(context)
       }
       await computeAndPublish(true)
       if (focusSettleTimer) clearTimeout(focusSettleTimer)
@@ -564,6 +677,20 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
 
   disposables.push(
     orca.events.on('agent.status.changed', async (ev) => {
+      const rawEv = ev as { paneKey?: string | null; tabId?: string | null }
+      const tabId =
+        typeof rawEv.paneKey === 'string' && rawEv.paneKey.trim()
+          ? rawEv.paneKey.includes(':')
+            ? rawEv.paneKey.split(':')[0].trim()
+            : rawEv.paneKey.trim()
+          : typeof rawEv.tabId === 'string' && rawEv.tabId.trim()
+            ? rawEv.tabId.trim()
+            : null
+
+      if (ev.terminalId && tabId) {
+        terminalToTabId.set(ev.terminalId, tabId)
+      }
+
       if (ev.terminalId && ev.workspaceId) {
         const wsPath =
           workspaceListCache.find((w) => w.id === ev.workspaceId)?.path ??
@@ -582,8 +709,14 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
           extractWorkspacePathFromId(ev.terminalId) ??
           prev?.workspacePath ??
           null
+        const resolvedTabId =
+          tabId ??
+          terminalToTabId.get(ev.terminalId) ??
+          prev?.tabId ??
+          null
         nextList.unshift({
           terminalId: ev.terminalId,
+          tabId: resolvedTabId,
           title: ev.title ?? prev?.title ?? null,
           agent: prev?.agent ?? null,
           state: ev.state,

@@ -38,7 +38,17 @@ The larger listing screenshots in the manifest are captured directly from Orca a
 
 ## Data access and privacy
 
-The worker reads local agent transcripts and Orca's local session journal to calculate usage. It reads the local Claude Code, Codex, Gemini, Antigravity, and Orca application data paths needed for those calculations.
+The worker reads local files in read-only mode to calculate usage and match sessions to Orca workspaces. Depending on which agents are installed, the paths include:
+
+- Claude Code: `~/.claude/projects/**/*.jsonl` and `~/.claude/settings.json`.
+- Codex: `~/.codex/sessions/**/*.jsonl` and `~/.codex/config.toml`.
+- Gemini CLI: `~/.gemini/tmp/**/chats/session-*.json` and `~/.gemini/settings.json`.
+- Antigravity: `~/.gemini/antigravity*/brain/**`, `<Orca data>/antigravity-chat/**`, and `<Orca data>/antigravity-accounts/*/**`.
+- Orca: `<Orca data>/agent-session-journal.db`, `<Orca data>/profiles/<active-profile>/profile-state.db`, and the runtime session directories under `<Orca data>/codex-runtime-home/` and `<Orca data>/codex-accounts/`.
+
+Token Pulse uses Orca's current official workspace and agent APIs for focus, status, terminal identity, and terminal focus. Detailed per-turn usage and subagent history still come from the local agent transcripts because the current host does not expose an official session-history API.
+
+The settings files are parsed only for model and account-home metadata. Token Pulse uses local paths internally to match sessions, but does not transmit credentials, prompts, responses, transcript contents, or local paths.
 
 The only outbound requests are public pricing reads from:
 

@@ -16,6 +16,7 @@ export interface UiMessages {
   avgLabel: string
   activeTokensLabel: string
   liveCostLabel: string
+  todayCostLabel: string
   periodCostLabel: string
   totalTokensLabel: string
   vsPrevious: string
@@ -24,8 +25,10 @@ export interface UiMessages {
   outputShort: string
   costShort: string
   runningAgentsHeader: string
+  subagentsHeader: string
+  reasoningLabel: string
+  reasoningNotRecorded: string
   clickToInspectHint: string
-  backToAgents: string
   outputStreamLabel: string
   inputStreamLabel: string
   live1sBadge: string
@@ -43,6 +46,8 @@ export interface UiMessages {
   pricingOnline: string
   pricingCached: string
   pricingBuiltin: string
+  pricingModelsLoaded: (count: number) => string
+  pricingModelsTooltip: string
   justNow: string
   minutesAgo: (m: number) => string
   hoursAgo: (h: number) => string
@@ -84,7 +89,8 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     peakLabel: '峰值',
     avgLabel: '平均',
     activeTokensLabel: '活躍 Token 數',
-    liveCostLabel: '即時預估費用',
+    liveCostLabel: '活躍對話累計費用',
+    todayCostLabel: '今日累計費用',
     periodCostLabel: '累計預估費用',
     totalTokensLabel: '總 Token 消耗',
     vsPrevious: '較前一週期',
@@ -93,8 +99,10 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     outputShort: '輸出',
     costShort: '費用',
     runningAgentsHeader: '執行與待命中的 Agent',
-    clickToInspectHint: '點擊展開 1s I/O 波形',
-    backToAgents: '返回全部 Agent',
+    subagentsHeader: 'Subagent 工作階段',
+    reasoningLabel: '推理等級',
+    reasoningNotRecorded: '—',
+    clickToInspectHint: '點擊查看 I/O；有終端時同步聚焦',
     outputStreamLabel: '模型輸出 · 回覆速度',
     inputStreamLabel: '送入模型 · 上下文速度',
     live1sBadge: '1s 即時',
@@ -112,6 +120,8 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     pricingOnline: '線上即時費率',
     pricingCached: '快取費率',
     pricingBuiltin: '內建基準費率',
+    pricingModelsLoaded: (count) => `${count} 個模型價格已載入`,
+    pricingModelsTooltip: '這是系統已知價格的模型數量，不是目前正在使用的模型數量。',
     justNow: '剛剛',
     minutesAgo: (m) => `${m} 分鐘前`,
     hoursAgo: (h) => `${h} 小時前`,
@@ -161,7 +171,8 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     peakLabel: '峰值',
     avgLabel: '平均',
     activeTokensLabel: '活跃 Token 数',
-    liveCostLabel: '实时预估费用',
+    liveCostLabel: '活跃对话累计费用',
+    todayCostLabel: '今日累计费用',
     periodCostLabel: '累计预估费用',
     totalTokensLabel: '总 Token 消耗',
     vsPrevious: '较上一周期',
@@ -170,8 +181,10 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     outputShort: '输出',
     costShort: '费用',
     runningAgentsHeader: '运行与待命中的 Agent',
-    clickToInspectHint: '点击展开 1s I/O 波形',
-    backToAgents: '返回全部 Agent',
+    subagentsHeader: 'Subagent 会话',
+    reasoningLabel: '推理等级',
+    reasoningNotRecorded: '—',
+    clickToInspectHint: '点击查看 I/O；有终端时同步聚焦',
     outputStreamLabel: '模型输出 · 回复速度',
     inputStreamLabel: '送入模型 · 上下文速度',
     live1sBadge: '1s 实时',
@@ -189,6 +202,8 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     pricingOnline: '在线实时费率',
     pricingCached: '缓存费率',
     pricingBuiltin: '内置基准费率',
+    pricingModelsLoaded: (count) => `已加载 ${count} 个模型价格`,
+    pricingModelsTooltip: '这是系统已知价格的模型数量，不是当前正在使用的模型数量。',
     justNow: '刚刚',
     minutesAgo: (m) => `${m} 分钟前`,
     hoursAgo: (h) => `${h} 小时前`,
@@ -238,7 +253,8 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     peakLabel: 'Peak',
     avgLabel: 'Avg',
     activeTokensLabel: 'ACTIVE TOKENS',
-    liveCostLabel: 'LIVE COST',
+    liveCostLabel: 'ACTIVE SESSION COST',
+    todayCostLabel: 'TODAY COST',
     periodCostLabel: 'EST. COST',
     totalTokensLabel: 'TOTAL TOKENS',
     vsPrevious: 'vs prior period',
@@ -247,8 +263,10 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     outputShort: 'Out',
     costShort: 'Cost',
     runningAgentsHeader: 'ACTIVE & RECENT AGENTS',
-    clickToInspectHint: 'Click agent for 1s I/O stream',
-    backToAgents: 'All Agents',
+    subagentsHeader: 'SUBAGENT SESSIONS',
+    reasoningLabel: 'REASONING',
+    reasoningNotRecorded: '—',
+    clickToInspectHint: 'Click for I/O; focuses its terminal when available',
     outputStreamLabel: 'MODEL OUTPUT · REPLY RATE',
     inputStreamLabel: 'MODEL INPUT · CONTEXT RATE',
     live1sBadge: '1s LIVE',
@@ -266,6 +284,8 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     pricingOnline: 'Live online rates',
     pricingCached: 'Cached rates',
     pricingBuiltin: 'Baseline rates',
+    pricingModelsLoaded: (count) => `${count} model prices loaded`,
+    pricingModelsTooltip: 'The number of models with known prices, not the number of models currently in use.',
     justNow: 'Just now',
     minutesAgo: (m) => `${m}m ago`,
     hoursAgo: (h) => `${h}h ago`,
@@ -315,7 +335,8 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     peakLabel: 'ピーク',
     avgLabel: '平均',
     activeTokensLabel: 'アクティブトークン',
-    liveCostLabel: 'リアルタイム費用',
+    liveCostLabel: 'アクティブセッション累計費用',
+    todayCostLabel: '今日累計費用',
     periodCostLabel: '推定コスト',
     totalTokensLabel: '合計トークン',
     vsPrevious: '前期間比',
@@ -324,8 +345,10 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     outputShort: '出力',
     costShort: '費用',
     runningAgentsHeader: '稼働中・待機中のエージェント',
-    clickToInspectHint: 'クリックで 1秒 I/O 波形',
-    backToAgents: '一覧へ戻る',
+    subagentsHeader: 'サブエージェント セッション',
+    reasoningLabel: '推論レベル',
+    reasoningNotRecorded: '—',
+    clickToInspectHint: 'クリックで I/O 表示（端末があればフォーカス）',
     outputStreamLabel: 'モデル出力 · 返信速度',
     inputStreamLabel: 'モデル入力 · コンテキスト速度',
     live1sBadge: '1s LIVE',
@@ -343,6 +366,8 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     pricingOnline: 'オンライン最新料金',
     pricingCached: 'キャッシュ料金',
     pricingBuiltin: '標準料金',
+    pricingModelsLoaded: (count) => `${count} 個のモデル料金を読み込み済み`,
+    pricingModelsTooltip: '価格が登録されているモデル数です。現在使用中のモデル数ではありません。',
     justNow: 'たった今',
     minutesAgo: (m) => `${m}分前`,
     hoursAgo: (h) => `${h}時間前`,
@@ -392,7 +417,8 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     peakLabel: '최대',
     avgLabel: '평균',
     activeTokensLabel: '활성 토큰',
-    liveCostLabel: '실시간 비용',
+    liveCostLabel: '활성 세션 누적 비용',
+    todayCostLabel: '오늘 누적 비용',
     periodCostLabel: '예상 비용',
     totalTokensLabel: '총 토큰',
     vsPrevious: '이전 기간 대비',
@@ -401,8 +427,10 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     outputShort: '출력',
     costShort: '비용',
     runningAgentsHeader: '실행 및 대기 중인 에이전트',
-    clickToInspectHint: '클릭하여 1초 I/O 파형 보기',
-    backToAgents: '전체 에이전트',
+    subagentsHeader: '서브에이전트 세션',
+    reasoningLabel: '추론 레벨',
+    reasoningNotRecorded: '—',
+    clickToInspectHint: '클릭하여 I/O 보기 (터미널이 있으면 포커스)',
     outputStreamLabel: '모델 출력 · 응답 속도',
     inputStreamLabel: '모델 입력 · 컨텍스트 속도',
     live1sBadge: '1s LIVE',
@@ -420,6 +448,8 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     pricingOnline: '실시간 온라인 요금',
     pricingCached: '캐시된 요금',
     pricingBuiltin: '기본 요금',
+    pricingModelsLoaded: (count) => `${count}개 모델 가격 로드됨`,
+    pricingModelsTooltip: '가격을 알고 있는 모델 수이며, 현재 사용 중인 모델 수가 아닙니다.',
     justNow: '방금 전',
     minutesAgo: (m) => `${m}분 전`,
     hoursAgo: (h) => `${h}시간 전`,

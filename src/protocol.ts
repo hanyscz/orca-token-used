@@ -24,13 +24,29 @@ export interface TpsStats {
   peakTps: number
 }
 
+export interface OrcaLiveAgentInfo {
+  terminalId: string | null
+  tabId?: string | null
+  title: string | null
+  agent: string | null
+  state: AgentRunState
+  stateStartedAt: number
+  workspacePath?: string | null
+}
+
 export interface LiveAgentCard {
   id: string
   /** Stable session identity (`<agent>:<sessionId>` or terminal ID) for 1s live drill-down */
   sessionKey: string
+  /** Parent session identity when this card represents a nested subagent. */
+  parentSessionKey?: string | null
+  /** Orca terminal to focus when this card represents a terminal-backed agent. */
+  terminalId: string | null
   agent: AgentKind
   providerLabel: string
   modelLabel: string
+  /** Observed reasoning levels in chronological order; empty means the source did not record one. */
+  reasoningLevels?: string[]
   state: AgentRunState
   title: string
   projectName: string | null
@@ -57,6 +73,7 @@ export interface WorktreeSessionItem {
   agent: AgentKind
   providerLabel: string
   modelLabel: string
+  reasoningLevels?: string[]
   title: string
   projectName: string | null
   workspaceName: string
@@ -119,6 +136,7 @@ export interface DashboardSnapshot {
     tokens: TokenBreakdown
     tps: TpsStats
     agents: LiveAgentCard[]
+    subagents: LiveAgentCard[]
   }
   sessions: WorktreeSessionItem[]
   periods: {
@@ -149,6 +167,10 @@ declare module 'orca' {
     'agent.livePoll': {
       input: { sessionKey: string }
       output: LiveAgentPollResult
+    }
+    'session.focus': {
+      input: { terminalId: string }
+      output: { focused: boolean }
     }
     'pricing.refresh': {
       input: Record<string, never>

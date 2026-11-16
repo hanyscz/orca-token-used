@@ -1,13 +1,15 @@
 import type {} from 'orca/frame'
 import type {
   AgentKind,
+  AgentRunState,
   DashboardSnapshot,
   LiveAgentCard,
   PeriodSummary,
   ScopeMode,
   TimeBucket,
   TokenBreakdown,
-  ViewTab
+  ViewTab,
+  WorktreeSessionItem
 } from '../protocol'
 import {
   formatRateTokPerSec,
@@ -18,6 +20,7 @@ import {
   getMessages,
   type UiMessages
 } from './i18n'
+import { PROVIDER_LOGO_DATA } from './provider-logos'
 
 const AGENT_COLORS: Record<AgentKind, string> = {
   claude: '#f97316',
@@ -45,7 +48,6 @@ export const TAB_ICONS_SVG: Record<ViewTab, string> = {
 /** Dynamic multi-wave + energy spark emblem for header branding */
 const BRAND_EMBLEM_SVG = `<svg viewBox="0 0 24 24" fill="none"><path class="tp-wave-path" d="M2 14.5C4.5 14.5 5.2 7.5 7.8 7.5C10.4 7.5 11.2 17.5 13.8 17.5C16.4 17.5 17.2 9.5 19.6 9.5C21 9.5 21.5 12 22 12" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.2 2.8L9.6 9.4H13.4L11.2 15.6L16.4 8.2H12.6L13.2 2.8Z" fill="#facc15" fill-opacity="0.92"/></svg>`
 
-const BACK_ARROW_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>`
 
 const REFRESH_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>`
 const DOLLAR_SYNC_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>`
@@ -59,6 +61,61 @@ export function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
+}
+
+function providerLogoHtml(providerLabel: string, agent?: AgentKind): string {
+  if (agent === 'antigravity') {
+    return `<img class="tp-provider-logo tp-provider-logo-antigravity" src="${PROVIDER_LOGO_DATA.antigravity}" alt="" aria-hidden="true" />`
+  }
+  const provider = providerLabel.toLowerCase()
+  const key = provider.includes('openai')
+    ? 'openai'
+    : provider.includes('anthropic')
+      ? 'anthropic'
+      : provider.includes('google')
+        ? 'google'
+        : null
+  if (!key) return ''
+  return `<img class="tp-provider-logo tp-provider-logo-${key}" src="${PROVIDER_LOGO_DATA[key]}" alt="" aria-hidden="true" />`
+}
+
+function reasoningBadgeHtml(levels: string[] | undefined, msg: UiMessages): string {
+  const values = Array.from(new Set((levels ?? []).filter((level) => level.trim())))
+  const current = values.at(-1) ?? msg.reasoningNotRecorded
+  const title = values.length > 0
+    ? `${msg.reasoningLabel}: ${values.join(' → ')}`
+    : `${msg.reasoningLabel}: ${msg.reasoningNotRecorded}`
+  return `<span class="tp-reasoning-chip" title="${escapeHtml(title)}">${escapeHtml(current)}</span>`
+}
+
+type CollapsedGroups = Readonly<Record<string, boolean>>
+
+function renderCollapseGroup(
+  key: string,
+  label: string,
+  count: number,
+  content: string,
+  collapsed: boolean
+): string {
+  return `
+    <details class="tp-collapse-group" data-collapse-key="${escapeHtml(key)}"${collapsed ? '' : ' open'}>
+      <summary class="tp-collapse-summary">
+        <span>${escapeHtml(label)} (${count})</span>
+        <span class="tp-collapse-chevron" aria-hidden="true">⌄</span>
+      </summary>
+      ${content}
+    </details>
+  `
+}
+
+function allLiveAgents(snap: DashboardSnapshot): LiveAgentCard[] {
+  return [...snap.live.agents, ...(snap.live.subagents ?? [])]
+}
+
+function findLiveAgent(snap: DashboardSnapshot, key: string): LiveAgentCard | null {
+  return (
+    allLiveAgents(snap).find((agent) => agent.sessionKey === key || agent.id === key) ?? null
+  )
 }
 
 export function formatProjectWorktreeLabel(
@@ -340,10 +397,6 @@ export function renderLiveAgentDetailHtml(agent: LiveAgentCard, msg: UiMessages)
   return `
     <div class="tp-io-monitor" data-detail-session-key="${escapeHtml(agent.sessionKey)}">
       <div class="tp-io-topbar">
-        <button type="button" class="tp-back-btn" id="btn-live-back">
-          ${BACK_ARROW_SVG}
-          <span>${escapeHtml(msg.backToAgents)}</span>
-        </button>
         <span class="tp-live-1s-pill">
           <span class="tp-live-1s-dot"></span>${escapeHtml(msg.live1sBadge)}
         </span>
@@ -366,10 +419,13 @@ export function renderLiveAgentDetailHtml(agent: LiveAgentCard, msg: UiMessages)
           <span class="tp-state tp-state-${agent.state}" data-io-state-wrap>
             <span class="tp-state-dot"></span><span data-io-text="state-label">${escapeHtml(msg.states[agent.state])}</span>
           </span>
-          <span class="tp-model-chip" data-io-text="model" title="${escapeHtml(providerModel)}">${escapeHtml(providerModel)}</span>
+          <span class="tp-row-left" style="gap:5px">
+            <span class="tp-model-chip" title="${escapeHtml(providerModel)}">${providerLogoHtml(agent.providerLabel, agent.agent)}<span data-io-text="model">${escapeHtml(agent.modelLabel)}</span></span>
+            ${reasoningBadgeHtml(agent.reasoningLevels, msg)}
+          </span>
         </div>
         <div class="tp-row-between">
-          <div class="tp-session-title" data-io-text="title" title="${escapeHtml(agent.title)}">${escapeHtml(agent.title)}</div>
+          <div class="tp-session-title tp-title-${agent.state}" data-io-text="title" title="${escapeHtml(agent.title)}">${escapeHtml(agent.title)}</div>
           <span class="tp-project-tag" data-io-text="proj" title="${escapeHtml(agent.workspacePath || projWt)}">${escapeHtml(projWt)}</span>
         </div>
         <div class="tp-io-meta-line">
@@ -485,8 +541,13 @@ export function renderStackedChartSvg(buckets: TimeBucket[], msg: UiMessages): s
   `
 }
 
-function renderLiveView(snap: DashboardSnapshot, msg: UiMessages): string {
-  const { tokens, tps, agents } = snap.live
+function renderLiveView(
+  snap: DashboardSnapshot,
+  msg: UiMessages,
+  collapsedGroups: CollapsedGroups = {}
+): string {
+  const { tokens, tps, agents, subagents = [] } = snap.live
+  const todayCost = snap.periods.all.day.tokens.costUsd
 
   const kpiHtml = `
     <div class="tp-kpi-grid">
@@ -498,6 +559,7 @@ function renderLiveView(snap: DashboardSnapshot, msg: UiMessages): string {
       <div class="tp-card">
         <div class="tp-kpi-label">${escapeHtml(msg.liveCostLabel)}</div>
         <div class="tp-kpi-value tp-kpi-cost">${formatUsd(tokens.costUsd)}</div>
+        <div class="tp-kpi-meta">${escapeHtml(msg.todayCostLabel)}: ${formatUsd(todayCost)}</div>
         <div class="tp-kpi-meta">${escapeHtml(msg.activeTokensLabel)}: ${formatTokens(tokens.total)}</div>
       </div>
     </div>
@@ -510,52 +572,152 @@ function renderLiveView(snap: DashboardSnapshot, msg: UiMessages): string {
     </div>
   `
 
+  const renderAgentCard = (a: LiveAgentCard, nested = false): string => {
+    const color = AGENT_COLORS[a.agent]
+    const shownTps = a.state === 'working' ? a.tps.liveTps : a.tps.avgTps
+    const providerModel = `${a.providerLabel} · ${a.modelLabel}`
+    const projWt = formatProjectWorktreeLabel(a.projectName, a.workspaceName)
+    return `
+      <div
+        class="tp-item-card tp-live-card-clickable${nested ? ' tp-subagent-card' : ''}"
+        role="button"
+        tabindex="0"
+        data-live-agent-key="${escapeHtml(a.sessionKey)}"
+        aria-label="${escapeHtml(`${nested ? `${msg.subagentsHeader} · ` : ''}${msg.agentNames[a.agent]} · ${a.title}`)}"
+      >
+        <div class="tp-row-between">
+          <div class="tp-row-left">
+            ${nested ? '<span class="tp-subagent-marker" aria-hidden="true">↳</span>' : ''}
+            <span class="tp-agent-badge tp-agent-${a.agent}">${escapeHtml(msg.agentNames[a.agent])}</span>
+            <span class="tp-state tp-state-${a.state}">
+              <span class="tp-state-dot"></span>${escapeHtml(msg.states[a.state])}
+            </span>
+          </div>
+          <span class="tp-mono-stat" style="color:${color}">
+            ${shownTps.toFixed(1)} tok/s<span class="tp-expand-chevron">›</span>
+          </span>
+        </div>
+        <div class="tp-row-between">
+          <div class="tp-row-left">
+            <span class="tp-model-chip" title="${escapeHtml(providerModel)}">${providerLogoHtml(a.providerLabel, a.agent)}<span>${escapeHtml(a.modelLabel)}</span></span>
+            ${reasoningBadgeHtml(a.reasoningLevels, msg)}
+          </div>
+          ${renderSparklineSvg(a.sparkline, color)}
+        </div>
+        <div class="tp-session-title tp-title-${a.state}" title="${escapeHtml(a.title)}">${escapeHtml(a.title)}</div>
+        <div class="tp-row-between" style="font-size:11px;color:var(--tp-muted)">
+          <span class="tp-project-tag" title="${escapeHtml(a.workspacePath || projWt)}">${escapeHtml(projWt)}</span>
+          <span>
+            <strong style="color:var(--tp-fg);font-family:var(--tp-font-mono)">${formatTokens(a.tokens.total)}</strong> tok ·
+            <span class="tp-cost-pill">${formatUsd(a.tokens.costUsd)}</span>
+          </span>
+        </div>
+      </div>
+    `
+  }
+
+  const renderAgentCards = (items: LiveAgentCard[], subagentPool: LiveAgentCard[]): string => {
+    const childrenByParent = new Map<string, LiveAgentCard[]>()
+    for (const child of subagentPool) {
+      if (!child.parentSessionKey) continue
+      const children = childrenByParent.get(child.parentSessionKey) ?? []
+      children.push(child)
+      childrenByParent.set(child.parentSessionKey, children)
+    }
+
+    const renderSubagentGroups = (
+      parent: LiveAgentCard,
+      children: LiveAgentCard[],
+      depth: number
+    ): string => {
+      const parentKey = `subagents:${parent.sessionKey}`
+      const groups = groupOrder
+        .map((state) => ({
+          state,
+          items: children.filter((child) => child.state === state)
+        }))
+        .filter((group) => group.items.length > 0)
+      const stateSummary = groups
+        .map((group) => `${msg.states[group.state]} ${group.items.length}`)
+        .join(' · ')
+      const collapsed = collapsedGroups[parentKey] ?? groups.every((group) => group.state === 'done')
+      const content = groups
+        .map((group) => {
+          const stateKey = `${parentKey}:${group.state}`
+          return renderCollapseGroup(
+            stateKey,
+            msg.states[group.state],
+            group.items.length,
+            `<div class="tp-subagent-status-cards">${group.items
+              .map((child) => renderTree(child, depth + 1))
+              .join('')}</div>`,
+            collapsedGroups[stateKey] ?? group.state === 'done'
+          )
+        })
+        .join('')
+      return `
+        <details class="tp-subagent-details" data-collapse-key="${escapeHtml(parentKey)}"${collapsed ? '' : ' open'}>
+          <summary class="tp-collapse-summary tp-subagent-summary">
+            <span>↳ ${escapeHtml(msg.subagentsHeader)} (${children.length})</span>
+            <span class="tp-subagent-state-summary">${escapeHtml(stateSummary)}</span>
+            <span class="tp-collapse-chevron" aria-hidden="true">⌄</span>
+          </summary>
+          <div class="tp-subagent-children">${content}</div>
+        </details>
+      `
+    }
+
+    const renderTree = (agent: LiveAgentCard, depth = 0): string => {
+      const children = childrenByParent.get(agent.sessionKey) ?? []
+      return `${renderAgentCard(agent, depth > 0)}${
+        children.length > 0 ? renderSubagentGroups(agent, children, depth) : ''
+      }`
+    }
+
+    return `<div class="tp-list">${items.map((agent) => renderTree(agent)).join('')}</div>`
+  }
+
+  const groupOrder: AgentRunState[] = ['working', 'waiting', 'blocked', 'done']
+  const mainSessionKeys = new Set(agents.map((agent) => agent.sessionKey))
+  const orphanSubagents = subagents.filter(
+    (agent) => !agent.parentSessionKey || !mainSessionKeys.has(agent.parentSessionKey)
+  )
   const cardsHtml =
     agents.length === 0
       ? `<div class="tp-empty">${escapeHtml(msg.noLiveAgents)}</div>`
-      : `<div class="tp-list">
-          ${agents
-            .map((a) => {
-              const color = AGENT_COLORS[a.agent]
-              const shownTps = a.state === 'working' ? a.tps.liveTps : a.tps.avgTps
-              const providerModel = `${a.providerLabel} · ${a.modelLabel}`
-              const projWt = formatProjectWorktreeLabel(a.projectName, a.workspaceName)
-              return `
-                <div
-                  class="tp-item-card tp-live-card-clickable"
-                  role="button"
-                  tabindex="0"
-                  data-live-agent-key="${escapeHtml(a.sessionKey)}"
-                  aria-label="${escapeHtml(`${msg.agentNames[a.agent]} · ${a.title}`)}"
-                >
-                  <div class="tp-row-between">
-                    <div class="tp-row-left">
-                      <span class="tp-agent-badge tp-agent-${a.agent}">${escapeHtml(msg.agentNames[a.agent])}</span>
-                      <span class="tp-state tp-state-${a.state}">
-                        <span class="tp-state-dot"></span>${escapeHtml(msg.states[a.state])}
-                      </span>
-                    </div>
-                    <span class="tp-mono-stat" style="color:${color}">
-                      ${shownTps.toFixed(1)} tok/s<span class="tp-expand-chevron">›</span>
-                    </span>
-                  </div>
-                  <div class="tp-row-between">
-                    <span class="tp-model-chip" title="${escapeHtml(providerModel)}">${escapeHtml(providerModel)}</span>
-                    ${renderSparklineSvg(a.sparkline, color)}
-                  </div>
-                  <div class="tp-session-title" title="${escapeHtml(a.title)}">${escapeHtml(a.title)}</div>
-                  <div class="tp-row-between" style="font-size:11px;color:var(--tp-muted)">
-                    <span class="tp-project-tag" title="${escapeHtml(a.workspacePath || projWt)}">${escapeHtml(projWt)}</span>
-                    <span>
-                      <strong style="color:var(--tp-fg);font-family:var(--tp-font-mono)">${formatTokens(a.tokens.total)}</strong> tok ·
-                      <span class="tp-cost-pill">${formatUsd(a.tokens.costUsd)}</span>
-                    </span>
-                  </div>
-                </div>
-              `
-            })
-            .join('')}
-        </div>`
+      : groupOrder
+          .map((state) => {
+            const items = agents.filter((agent) => agent.state === state)
+            if (items.length === 0) return ''
+            const key = `live:${state}`
+            return renderCollapseGroup(
+              key,
+              msg.states[state],
+              items.length,
+              renderAgentCards(items, subagents),
+              collapsedGroups[key] ?? state === 'done'
+            )
+          })
+          .join('')
+  const orphanSubagentHtml =
+    orphanSubagents.length > 0
+      ? groupOrder
+          .map((state) => {
+            const items = orphanSubagents.filter((agent) => agent.state === state)
+            if (items.length === 0) return ''
+            const key = `subagents:orphan:${state}`
+            return renderCollapseGroup(
+              key,
+              msg.states[state],
+              items.length,
+              `<div class="tp-subagent-orphans">${items
+                .map((agent) => renderAgentCard(agent, true))
+                .join('')}</div>`,
+              collapsedGroups[key] ?? state === 'done'
+            )
+          })
+          .join('')
+      : ''
 
   return `
     ${kpiHtml}
@@ -564,10 +726,16 @@ function renderLiveView(snap: DashboardSnapshot, msg: UiMessages): string {
       ${agents.length > 0 ? `<span class="tp-section-hint">${escapeHtml(msg.clickToInspectHint)}</span>` : ''}
     </div>
     ${cardsHtml}
+    ${orphanSubagentHtml}
   `
 }
 
-function renderSessionsView(snap: DashboardSnapshot, msg: UiMessages, nowMs: number): string {
+function renderSessionsView(
+  snap: DashboardSnapshot,
+  msg: UiMessages,
+  nowMs: number,
+  collapsedGroups: CollapsedGroups = {}
+): string {
   const list = snap.sessions
   const totalWorktreeCost = list.reduce((acc, s) => acc + s.tokens.costUsd, 0)
   const totalWorktreeTok = list.reduce((acc, s) => acc + s.tokens.total, 0)
@@ -591,8 +759,9 @@ function renderSessionsView(snap: DashboardSnapshot, msg: UiMessages, nowMs: num
     return `${summaryStrip}<div class="tp-empty">${escapeHtml(msg.noSessionsInWorktree)}</div>`
   }
 
-  const itemsHtml = list
-    .map((s) => {
+  const renderSessionItems = (items: WorktreeSessionItem[]): string =>
+    `<div class="tp-list">${items
+      .map((s) => {
       const rel = formatRelativeTime(s.updatedAt, nowMs, msg)
       const providerModel = `${s.providerLabel} · ${s.modelLabel}`
       const projWt = formatProjectWorktreeLabel(s.projectName, s.workspaceName)
@@ -602,7 +771,8 @@ function renderSessionsView(snap: DashboardSnapshot, msg: UiMessages, nowMs: num
           <div class="tp-row-between">
             <div class="tp-row-left">
               <span class="tp-agent-badge tp-agent-${s.agent}">${escapeHtml(msg.agentNames[s.agent])}</span>
-              <span class="tp-model-chip" title="${escapeHtml(providerModel)}">${escapeHtml(providerModel)}</span>
+            <span class="tp-model-chip" title="${escapeHtml(providerModel)}">${providerLogoHtml(s.providerLabel, s.agent)}<span>${escapeHtml(s.modelLabel)}</span></span>
+            ${reasoningBadgeHtml(s.reasoningLevels, msg)}
             </div>
             <span class="tp-mono-stat">${s.tps.avgTps.toFixed(1)} tok/s</span>
           </div>
@@ -619,10 +789,33 @@ function renderSessionsView(snap: DashboardSnapshot, msg: UiMessages, nowMs: num
           ${renderTricolorBar(s.tokens, msg, false)}
         </div>
       `
-    })
-    .join('')
+      })
+      .join('')}</div>`
 
-  return `${summaryStrip}<div class="tp-list">${itemsHtml}</div>`
+  const active = list.filter((session) => session.active)
+  const recent = list.filter((session) => !session.active)
+  const groups = [
+    active.length > 0
+      ? renderCollapseGroup(
+          'sessions:active',
+          msg.activeBadge,
+          active.length,
+          renderSessionItems(active),
+          collapsedGroups['sessions:active'] ?? false
+        )
+      : '',
+    recent.length > 0
+      ? renderCollapseGroup(
+          'sessions:recent',
+          msg.sortedNewestHint,
+          recent.length,
+          renderSessionItems(recent),
+          collapsedGroups['sessions:recent'] ?? true
+        )
+      : ''
+  ].join('')
+
+  return `${summaryStrip}${groups}`
 }
 
 function renderPeriodView(
@@ -700,7 +893,7 @@ function renderPeriodView(
             <div class="tp-share-fill" style="width:${Math.min(100, row.sharePercent).toFixed(1)}%;background:${color}"></div>
           </div>
           <div class="tp-row-between" style="font-size:10.5px;color:var(--tp-muted);font-family:var(--tp-font-mono)">
-            <span title="${escapeHtml(providerModel)}">${escapeHtml(providerModel)}</span>
+            <span class="tp-model-inline" title="${escapeHtml(providerModel)}">${providerLogoHtml(row.providerLabel, row.agent)}<span>${escapeHtml(row.topModel)}</span></span>
             <span>${escapeHtml(msg.avgLabel)} ${row.tps.avgTps.toFixed(1)} · ${escapeHtml(msg.peakLabel)} ${row.tps.peakTps.toFixed(1)} tok/s</span>
           </div>
         </div>
@@ -727,6 +920,7 @@ export function renderDashboardShellHtml(params: {
   liveDetailAgent?: LiveAgentCard | null
   isRefreshing?: boolean
   isSyncingPricing?: boolean
+  collapsedGroups?: CollapsedGroups
   nowMs?: number
 }): string {
   const {
@@ -737,7 +931,8 @@ export function renderDashboardShellHtml(params: {
     selectedLiveAgentKey = null,
     liveDetailAgent = null,
     isRefreshing = false,
-    isSyncingPricing = false
+    isSyncingPricing = false,
+    collapsedGroups = {}
   } = params
   const nowMs = params.nowMs ?? Date.now()
   const msg = getMessages(locale)
@@ -759,9 +954,9 @@ export function renderDashboardShellHtml(params: {
         (liveDetailAgent.sessionKey === selectedLiveAgentKey ||
           liveDetailAgent.id === selectedLiveAgentKey)
           ? liveDetailAgent
-          : snap?.live.agents.find(
-              (a) => a.sessionKey === selectedLiveAgentKey || a.id === selectedLiveAgentKey
-            ) ?? null)
+          : snap
+            ? findLiveAgent(snap, selectedLiveAgentKey)
+            : null)
       : null
 
   let rightControlHtml = ''
@@ -795,10 +990,10 @@ export function renderDashboardShellHtml(params: {
       if (resolvedExpandedAgent) {
         mainBodyHtml = `<div id="tp-live-detail-root">${renderLiveAgentDetailHtml(resolvedExpandedAgent, msg)}</div>`
       } else {
-        mainBodyHtml = renderLiveView(snap, msg)
+        mainBodyHtml = renderLiveView(snap, msg, collapsedGroups)
       }
     } else if (tab === 'sessions') {
-      mainBodyHtml = renderSessionsView(snap, msg, nowMs)
+      mainBodyHtml = renderSessionsView(snap, msg, nowMs, collapsedGroups)
     } else {
       const scopeBag = snap.periods[scope]
       mainBodyHtml = renderPeriodView(tab, scopeBag[tab], snap, scope, msg)
@@ -819,7 +1014,7 @@ export function renderDashboardShellHtml(params: {
           <i class="tp-dot" style="background:${p.source === 'online' ? '#10b981' : '#f59e0b'}"></i>
           ${escapeHtml(pSourceLabel)}${syncTime ? ` · ${escapeHtml(syncTime)}` : ''}
         </span>
-        <span>${p.modelCount} models</span>
+        <span title="${escapeHtml(msg.pricingModelsTooltip)}">${escapeHtml(msg.pricingModelsLoaded(p.modelCount))}</span>
       </div>
     `
   }
@@ -891,7 +1086,10 @@ function initBrowserPanel(): void {
   let liveDetailAgent: LiveAgentCard | null = null
   let liveDetailGeneratedAt = 0
   let livePollTimer: ReturnType<typeof setInterval> | null = null
+  let localeSyncTimer: ReturnType<typeof setInterval> | null = null
+  let localeSyncInFlight = false
   let livePollInFlight = false
+  let collapsedGroups: Record<string, boolean> = {}
 
   interface StreamSecSample {
     outTarget: number
@@ -914,6 +1112,11 @@ function initBrowserPanel(): void {
     const savedTab = localStorage.getItem('tp.activeTab') as ViewTab | null
     if (savedTab && TAB_ORDER.includes(savedTab)) currentTab = savedTab
     if (localStorage.getItem('tp.scope') === 'worktree') currentScope = 'worktree'
+    const savedGroups = localStorage.getItem('tp.collapsedGroups')
+    if (savedGroups) {
+      const parsed = JSON.parse(savedGroups)
+      if (parsed && typeof parsed === 'object') collapsedGroups = parsed
+    }
   } catch {
     // Ignore storage access errors in strict frames
   }
@@ -923,10 +1126,9 @@ function initBrowserPanel(): void {
   let isSyncingPricing = false
 
   function resolveEffectiveLocale(): string {
-    if (overrideLocale) return overrideLocale
     return typeof window.orca?.locale === 'string' && window.orca.locale
       ? window.orca.locale
-      : navigator.language || 'en'
+      : overrideLocale || navigator.language || 'en'
   }
 
   function resetStreamState(): void {
@@ -1212,7 +1414,7 @@ function initBrowserPanel(): void {
     setIoText(detailRoot, 'out-rate', formatRateTokPerSec(agent.liveOutRate))
     setIoText(detailRoot, 'in-rate', formatRateTokPerSec(agent.liveInRate))
     setIoText(detailRoot, 'state-label', msg.states[agent.state])
-    setIoText(detailRoot, 'model', providerModel)
+    setIoText(detailRoot, 'model', agent.modelLabel)
     setIoText(detailRoot, 'title', agent.title)
     setIoText(detailRoot, 'proj', projWt)
     setIoText(detailRoot, 'avg', `${agent.tps.avgTps.toFixed(1)}/s`)
@@ -1243,9 +1445,9 @@ function initBrowserPanel(): void {
           (liveDetailAgent.sessionKey === selectedLiveAgentKey ||
             liveDetailAgent.id === selectedLiveAgentKey)
             ? liveDetailAgent
-            : snapshot?.live.agents.find(
-                (a) => a.sessionKey === selectedLiveAgentKey || a.id === selectedLiveAgentKey
-              ) ?? null)
+            : snapshot
+              ? findLiveAgent(snapshot, selectedLiveAgentKey)
+              : null)
         : null
 
     if (activeExpandedAgent) {
@@ -1260,7 +1462,8 @@ function initBrowserPanel(): void {
       selectedLiveAgentKey,
       liveDetailAgent,
       isRefreshing,
-      isSyncingPricing
+      isSyncingPricing,
+      collapsedGroups
     })
 
     if (activeExpandedAgent) {
@@ -1314,10 +1517,7 @@ function initBrowserPanel(): void {
       liveDetailAgent = null
       liveDetailGeneratedAt = 0
     } else {
-      liveDetailAgent =
-        snapshot?.live.agents.find(
-          (a) => a.sessionKey === sessionKey || a.id === sessionKey
-        ) ?? null
+      liveDetailAgent = snapshot ? findLiveAgent(snapshot, sessionKey) : null
       liveDetailGeneratedAt = liveDetailAgent && snapshot ? snapshot.generatedAt : 0
     }
     syncLiveStreamEngines()
@@ -1327,19 +1527,43 @@ function initBrowserPanel(): void {
     }
   }
 
+  async function focusLiveAgent(agent: LiveAgentCard | null): Promise<void> {
+    if (!agent?.terminalId || typeof window.orca === 'undefined') return
+    try {
+      await window.orca.plugin.request('session.focus', { terminalId: agent.terminalId })
+    } catch {
+      // Chat UI sessions and older Orca hosts may not expose a focusable terminal.
+    }
+  }
+
+  appRoot.addEventListener(
+    'toggle',
+    (ev) => {
+      const group = (ev.target as HTMLElement | null)?.closest<HTMLDetailsElement>(
+        'details[data-collapse-key]'
+      )
+      const key = group?.dataset.collapseKey
+      if (!key || !group) return
+      collapsedGroups[key] = !group.open
+      try {
+        localStorage.setItem('tp.collapsedGroups', JSON.stringify(collapsedGroups))
+      } catch {
+        // Ignore storage access errors in strict frames
+      }
+    },
+    true
+  )
+
   appRoot.addEventListener('click', async (ev) => {
     const target = ev.target as HTMLElement | null
     if (!target) return
-
-    if (target.closest('#btn-live-back')) {
-      selectLiveAgent(null)
-      return
-    }
 
     const liveCard = target.closest<HTMLElement>('[data-live-agent-key]')
     if (liveCard && currentTab === 'live') {
       const key = liveCard.dataset.liveAgentKey?.trim() || ''
       if (key) {
+        const agent = snapshot ? findLiveAgent(snapshot, key) : null
+        void focusLiveAgent(agent)
         selectLiveAgent(key)
       }
       return
@@ -1393,9 +1617,7 @@ function initBrowserPanel(): void {
           locale: resolveEffectiveLocale()
         })
         if (selectedLiveAgentKey && snapshot) {
-          const hit = snapshot.live.agents.find(
-            (a) => a.sessionKey === selectedLiveAgentKey || a.id === selectedLiveAgentKey
-          )
+          const hit = findLiveAgent(snapshot, selectedLiveAgentKey)
           if (hit) liveDetailAgent = hit
         }
       } catch (err) {
@@ -1455,12 +1677,41 @@ function initBrowserPanel(): void {
       clearInterval(livePollTimer)
       livePollTimer = null
     }
+    if (localeSyncTimer !== null) {
+      clearInterval(localeSyncTimer)
+      localeSyncTimer = null
+    }
     stopStreamRaf()
   })
 
   renderApp()
 
   if (typeof window.orca !== 'undefined') {
+    let lastOrcaLocale = resolveEffectiveLocale()
+
+    localeSyncTimer = setInterval(() => {
+      const nextLocale = resolveEffectiveLocale()
+      if (nextLocale === lastOrcaLocale) return
+      lastOrcaLocale = nextLocale
+      overrideLocale = null
+      renderApp()
+      if (localeSyncInFlight) return
+
+      localeSyncInFlight = true
+      void window.orca.plugin
+        .request('dashboard.get', { forceScan: false, locale: nextLocale })
+        .then((nextSnap) => {
+          snapshot = nextSnap
+          renderApp()
+        })
+        .catch(() => {
+          // Ignore transient locale sync errors; the panel already uses the new locale.
+        })
+        .finally(() => {
+          localeSyncInFlight = false
+        })
+    }, 1000)
+
     window.orca.on('theme', () => {
       renderApp()
     })
@@ -1475,9 +1726,7 @@ function initBrowserPanel(): void {
           emblem.classList.toggle('tp-brand-live', anyWorking)
         }
         if (nextSnap.generatedAt >= liveDetailGeneratedAt) {
-          const updatedAgent = nextSnap.live.agents.find(
-            (a) => a.sessionKey === selectedLiveAgentKey || a.id === selectedLiveAgentKey
-          )
+          const updatedAgent = findLiveAgent(nextSnap, selectedLiveAgentKey)
           if (updatedAgent) {
             liveDetailGeneratedAt = nextSnap.generatedAt
             liveDetailAgent = updatedAgent
@@ -1508,10 +1757,7 @@ function initBrowserPanel(): void {
       if ('liveAgentKey' in nextView) {
         selectedLiveAgentKey = nextView.liveAgentKey ?? null
         if (selectedLiveAgentKey && snapshot) {
-          liveDetailAgent =
-            snapshot.live.agents.find(
-              (a) => a.sessionKey === selectedLiveAgentKey || a.id === selectedLiveAgentKey
-            ) ?? liveDetailAgent
+          liveDetailAgent = findLiveAgent(snapshot, selectedLiveAgentKey) ?? liveDetailAgent
         } else if (!selectedLiveAgentKey) {
           liveDetailAgent = null
         }
@@ -1537,10 +1783,7 @@ function initBrowserPanel(): void {
       .then((snap) => {
         snapshot = snap
         if (selectedLiveAgentKey) {
-          liveDetailAgent =
-            snap.live.agents.find(
-              (a) => a.sessionKey === selectedLiveAgentKey || a.id === selectedLiveAgentKey
-            ) ?? liveDetailAgent
+          liveDetailAgent = findLiveAgent(snap, selectedLiveAgentKey) ?? liveDetailAgent
         }
         renderApp()
       })

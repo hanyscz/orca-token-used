@@ -189,6 +189,11 @@ describe('4-Agent Transcript Parsers & TPS Accuracy', () => {
         payload: { type: 'user_message', message: 'Audit adversarial P0/P1 edge cases' }
       }),
       JSON.stringify({
+        timestamp: '2026-11-11T06:10:01.100Z',
+        type: 'event_msg',
+        payload: { type: 'thread_settings_applied', thread_settings: { reasoning_effort: 'xhigh' } }
+      }),
+      JSON.stringify({
         timestamp: '2026-11-11T06:10:06.000Z',
         type: 'event_msg',
         payload: {
@@ -224,6 +229,8 @@ describe('4-Agent Transcript Parsers & TPS Accuracy', () => {
 
     assert.equal(st.sessionId, '01a0c6de-1111-2222-3333-444455556666')
     assert.equal(st.isSubagent, true)
+    assert.equal(st.parentSessionId, 'root-1')
+    assert.deepEqual(st.reasoningLevels, ['XHigh'])
     assert.equal(st.latestModel, 'gpt-6.1-sol')
     assert.equal(st.turnsByKey.size, 1)
 
@@ -234,6 +241,24 @@ describe('4-Agent Transcript Parsers & TPS Accuracy', () => {
     assert.equal(turn.reasoning, 200)
     assert.equal(turn.total, 10500)
     assert.equal(turn.tps, 100)
+  })
+
+  test('Claude sidechain transcripts preserve parent message linkage', () => {
+    const st = createEmptySessionState('claude-sidechain', 'claude', '/tmp/claude-sidechain.jsonl')
+    applyClaudeLines(st, [
+      JSON.stringify({
+        uuid: 'child-message-1',
+        parentUuid: 'parent-message-1',
+        isSidechain: true,
+        timestamp: '2026-11-11T06:20:00.000Z',
+        cwd: '/Users/dev/project-alpha',
+        type: 'user',
+        message: { content: 'Inspect the child task' }
+      })
+    ])
+    assert.equal(st.isSubagent, true)
+    assert.equal(st.parentMessageUuid, 'parent-message-1')
+    assert.deepEqual(st.messageUuids, ['child-message-1'])
   })
 
   test('Antigravity computes TPS for start-timed & out-of-order steps, guards 1s quantization spikes, and filters helpers', () => {
@@ -537,6 +562,7 @@ describe('Aggregator, Left-Sidebar Project/Worktree Focus, Pure-Icon UI & i18n',
     const sNewerA = createEmptySessionState('s-newer-a', 'codex', '/tmp/newer-a.jsonl')
     sNewerA.cwd = '/Users/dev/orca-token-used/src'
     sNewerA.latestModel = 'gpt-6.1-sol'
+    sNewerA.reasoningLevels = ['XHigh']
     sNewerA.createdAtMs = now - 600_000
     sNewerA.updatedAtMs = now - 10_000
     sNewerA.titleHint = 'Fix <script>alert("xss")</script> bug'
@@ -558,6 +584,7 @@ describe('Aggregator, Left-Sidebar Project/Worktree Focus, Pure-Icon UI & i18n',
     const sSubagentA = createEmptySessionState('s-sub-a', 'codex', '/tmp/sub-a.jsonl')
     sSubagentA.cwd = '/Users/dev/orca-token-used'
     sSubagentA.isSubagent = true
+    sSubagentA.parentSessionId = 's-newer-a'
     sSubagentA.updatedAtMs = now - 8_000
     sSubagentA.turnsByKey.set('t-sub', {
       turnKey: 't-sub',
@@ -838,6 +865,20 @@ describe('Aggregator, Left-Sidebar Project/Worktree Focus, Pure-Icon UI & i18n',
     assert.ok(htmlExpandedLive.includes('data-io-path="out-stroke"'))
     assert.ok(htmlExpandedLive.includes('data-io-path="in-stroke"'))
     assert.ok(htmlExpandedLive.includes('OpenAI · gpt-6.1-terra'))
+    const htmlLiveOverview = renderDashboardShellHtml({
+      snap: snapA,
+      tab: 'live',
+      scope: 'worktree',
+      locale: 'en',
+      nowMs: now
+    })
+    assert.ok(htmlLiveOverview.includes(getMessages('en').liveCostLabel))
+    assert.ok(htmlLiveOverview.includes(getMessages('en').todayCostLabel))
+    assert.ok(htmlLiveOverview.includes('tp-subagent-children'))
+    assert.ok(!htmlLiveOverview.includes('live:subagents'))
+    assert.ok(htmlLiveOverview.includes('tp-reasoning-chip'))
+    assert.ok(htmlLiveOverview.includes('XHigh'))
+    assert.ok(htmlLiveOverview.includes(formatUsd(snapA.periods.all.day.tokens.costUsd)))
     assert.ok(!htmlExpandedLive.includes('PulseBoard UI redesign'))
     const outIdx = htmlExpandedLive.indexOf('MODEL OUTPUT · REPLY RATE')
     const inIdx = htmlExpandedLive.indexOf('MODEL INPUT · CONTEXT RATE')
@@ -1511,9 +1552,13 @@ describe('Terminal Tab & Handoff Title Synchronization Regressions', () => {
       assert.equal(card54.workspaceName, 'release-1.0')
       assert.equal(card54.tokens.total, 5500)
 
-      // Subagent must be excluded from user sessions/live cards, yet included in worktree period token totals
+      // Subagent stays out of the primary session list but renders under its parent and counts in worktree totals
       assert.ok(!snap.sessions.some((s) => s.sessionId === 'sub-brain-99'))
       assert.ok(!snap.live.agents.some((a) => a.sessionKey.includes('sub-brain-99')))
+      const subagentCard = snap.live.subagents.find((a) => a.sessionKey.includes('sub-brain-99'))
+      assert.ok(subagentCard, 'Expected subagent in the Live snapshot')
+      assert.equal(subagentCard.parentSessionKey, 'antigravity:228134bd-main')
+      assert.equal(subagentCard.tokens.total, 3300)
       assert.equal(snap.periods.worktree.day.tokens.total, 5500 + 3300 + 2100)
 
       // Turn-1 session without summary DB row resolves worktree via history.jsonl
@@ -2368,5 +2413,504 @@ describe('Terminal Tab & Handoff Title Synchronization Regressions', () => {
       .find((line) => line.trim().startsWith('git add -A --'))
     assert.ok(gitAddLine, 'Expected git add release line in publish-plugin.sh')
     assert.ok(!gitAddLine.includes('*-plan.md'))
+  })
+
+  test('binds runtime terminal handles (term_*) to parallel tabs via tabId and never cross-binds sessions (# ui opt / #voice name)', async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-term-crossbind-'))
+    try {
+      const homeDir = path.join(tmpRoot, 'home')
+      const orcaDir = path.join(tmpRoot, 'orca')
+      const wtPath = path.join(tmpRoot, 'ws', 'test-app')
+      fs.mkdirSync(wtPath, { recursive: true })
+      fs.mkdirSync(orcaDir, { recursive: true })
+      fs.writeFileSync(
+        path.join(orcaDir, 'orca-profile-index.json'),
+        JSON.stringify({ schemaVersion: 1, activeProfileId: 'local-default' }),
+        'utf8'
+      )
+
+      const wtId = `repo-1::${wtPath}`
+      const now = Date.now()
+      const tabIdUi = 'tab-ui-opt-uuid'
+      const tabIdVoice = 'tab-voice-name-uuid'
+      const ptyIdUi = `${wtId}@@pty-ui`
+      const ptyIdVoice = `${wtId}@@pty-voice`
+      const termHandleUi = 'term_11111111-2222-3333-4444-555555555555'
+      const termHandleVoice = 'term_99999999-8888-7777-6666-555555555555'
+
+      // Profile state: two parallel terminal tabs in one worktree with custom titles
+      writeTestProfileStateParts(path.join(orcaDir, 'profiles', 'local-default', 'profile-state.db'), [
+        { key: '["activeWorktreeId"]', payload: wtId },
+        {
+          key: `["tabsByWorktree",${JSON.stringify(wtId)}]`,
+          payload: [
+            {
+              id: tabIdUi,
+              ptyId: ptyIdUi,
+              worktreeId: wtId,
+              title: 'agy',
+              defaultTitle: 'Terminal 1',
+              customTitle: '# ui opt',
+              launchAgent: 'antigravity',
+              createdAt: now - 120_000
+            },
+            {
+              id: tabIdVoice,
+              ptyId: ptyIdVoice,
+              worktreeId: wtId,
+              title: 'agy',
+              defaultTitle: 'Terminal 2',
+              customTitle: '#voice name',
+              launchAgent: 'antigravity',
+              createdAt: now - 60_000
+            }
+          ]
+        },
+        {
+          key: `["unifiedTabs",${JSON.stringify(wtId)}]`,
+          payload: [
+            {
+              id: tabIdUi,
+              contentType: 'terminal',
+              entityId: ptyIdUi,
+              worktreeId: wtId,
+              customLabel: '# ui opt',
+              lastFocusedAt: now - 10_000
+            },
+            {
+              id: tabIdVoice,
+              contentType: 'terminal',
+              entityId: ptyIdVoice,
+              worktreeId: wtId,
+              customLabel: '#voice name',
+              lastFocusedAt: now - 5_000
+            }
+          ]
+        }
+      ])
+
+      const makeSession = (
+        id: string,
+        hint: string,
+        createdAtMs: number,
+        updatedAtMs: number
+      ) => {
+        const s = createEmptySessionState(id, 'antigravity', `/tmp/${id}.jsonl`)
+        s.cwd = wtPath
+        s.titleHint = hint
+        s.createdAtMs = createdAtMs
+        s.updatedAtMs = updatedAtMs
+        s.lastMtimeMs = updatedAtMs
+        s.lastEventState = 'working'
+        s.turnsByKey.set('t1', {
+          turnKey: 't1',
+          timestampMs: updatedAtMs,
+          input: 300,
+          output: 80,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 380,
+          durationSec: 2,
+          tps: 40,
+          model: 'gemini-3-pro',
+          explicitCostUsd: null
+        })
+        return s
+      }
+
+      // Two sessions in the same worktree matching the respective tabs
+      const sUi = makeSession('sess-ui', 'Optimize UI rendering', now - 110_000, now - 8_000)
+      const sVoice = makeSession('sess-voice', 'Implement voice names', now - 55_000, now - 4_000)
+
+      const journal = readOrcaJournalIndex([orcaDir], homeDir)
+
+      // Test Part 1: Aggregator level with tabId in OrcaLiveAgentInfo
+      const snapDirect = buildDashboardSnapshot(
+        [sUi, sVoice],
+        journal,
+        new PricingEngine(),
+        {
+          focusedId: wtId,
+          focusedName: 'main',
+          focusedBranch: 'main',
+          focusedPath: wtPath,
+          liveAgents: [
+            {
+              terminalId: termHandleUi,
+              tabId: tabIdUi,
+              title: 'agy',
+              agent: 'antigravity',
+              state: 'working',
+              stateStartedAt: now - 8_000,
+              workspacePath: wtPath
+            },
+            {
+              terminalId: termHandleVoice,
+              tabId: tabIdVoice,
+              title: 'agy',
+              agent: 'antigravity',
+              state: 'working',
+              stateStartedAt: now - 4_000,
+              workspacePath: wtPath
+            }
+          ]
+        },
+        now
+      )
+
+      assert.equal(snapDirect.live.agents.length, 2)
+      const cardUi = snapDirect.live.agents.find((c) => c.title === '# ui opt')
+      const cardVoice = snapDirect.live.agents.find((c) => c.title === '#voice name')
+
+      assert.ok(cardUi, 'Must find card with title "# ui opt"')
+      assert.ok(cardVoice, 'Must find card with title "#voice name"')
+
+      assert.equal(cardUi?.terminalId, termHandleUi, '# ui opt must bind to termHandleUi')
+      assert.equal(cardUi?.sessionKey, 'antigravity:sess-ui', '# ui opt must bind to sess-ui')
+
+      assert.equal(cardVoice?.terminalId, termHandleVoice, '#voice name must bind to termHandleVoice')
+      assert.equal(cardVoice?.sessionKey, 'antigravity:sess-voice', '#voice name must bind to sess-voice')
+
+      // Test Part 2: Worker integration end-to-end
+      // Orca emits agent.status.changed with paneKey: "<tabId>:<leafId>"
+      writeTestAntigravitySummariesDb(
+        path.join(homeDir, '.gemini', 'antigravity-cli', 'conversation_summaries.db'),
+        [
+          {
+            conversation_id: 'sess-ui',
+            title: 'Optimize UI rendering',
+            workspace_uris: JSON.stringify([`file://${wtPath}`]),
+            last_modified_time: new Date(now - 8_000).toISOString()
+          },
+          {
+            conversation_id: 'sess-voice',
+            title: 'Implement voice names',
+            workspace_uris: JSON.stringify([`file://${wtPath}`]),
+            last_modified_time: new Date(now - 4_000).toISOString()
+          }
+        ]
+      )
+
+      const writeConv = (id: string, startOffsetMs: number, updatedOffsetMs: number) => {
+        const logDir = path.join(
+          homeDir,
+          '.gemini',
+          'antigravity-cli',
+          'brain',
+          id,
+          '.system_generated',
+          'logs'
+        )
+        fs.mkdirSync(logDir, { recursive: true })
+        fs.writeFileSync(
+          path.join(logDir, 'transcript.jsonl'),
+          [
+            JSON.stringify({
+              step_index: 0,
+              type: 'USER_INPUT',
+              created_at: new Date(now - startOffsetMs).toISOString(),
+              content: `<USER_REQUEST>Task ${id}</USER_REQUEST>`
+            }),
+            JSON.stringify({
+              step_index: 1,
+              type: 'PLANNER_RESPONSE',
+              status: 'IN_PROGRESS',
+              created_at: new Date(now - updatedOffsetMs).toISOString(),
+              model: 'gemini-3-pro',
+              input_tokens: 1000,
+              output_tokens: 250
+            })
+          ].join('\n') + '\n',
+          'utf8'
+        )
+      }
+      writeConv('sess-ui', 110_000, 8_000)
+      writeConv('sess-voice', 55_000, 4_000)
+
+      process.env.TOKEN_PULSE_HOME_DIR = homeDir
+      process.env.TOKEN_PULSE_ORCA_DATA_DIR = orcaDir
+
+      const workerModule = await import('./worker')
+      const host = mockHost({
+        settings: { pricingSyncHours: 6, livePollSeconds: 10 },
+        results: {
+          'workspace.list': () => ({
+            workspaces: [
+              {
+                id: wtId,
+                kind: 'worktree',
+                name: 'main',
+                project: 'test-app',
+                path: wtPath,
+                branch: 'refs/heads/main',
+                hostId: 'local'
+              }
+            ],
+            truncated: false
+          }),
+          'workspace.readContext': () => ({
+            workspaceId: wtId,
+            branch: 'refs/heads/main',
+            displayName: 'main',
+            terminals: [
+              { id: termHandleUi, title: 'agy', tabId: tabIdUi },
+              { id: termHandleVoice, title: 'agy', tabId: tabIdVoice }
+            ]
+          }),
+          'agents.list': () => ({
+            agents: [
+              {
+                terminalId: termHandleUi,
+                title: 'agy',
+                agent: 'antigravity',
+                state: 'working',
+                stateStartedAt: now - 8_000
+              },
+              {
+                terminalId: termHandleVoice,
+                title: 'agy',
+                agent: 'antigravity',
+                state: 'working',
+                stateStartedAt: now - 4_000
+              }
+            ]
+          }),
+          'statusBar.update': () => ({ ok: true })
+        }
+      })
+
+      const worker = await mountWorker(workerModule, { host })
+      try {
+        // Emit agent.status.changed with paneKey in "<tabId>:<leafId>" format
+        await worker.emit('agent.status.changed', {
+          workspaceId: wtId,
+          paneKey: `${tabIdUi}:leaf-0`,
+          terminalId: termHandleUi,
+          state: 'working',
+          title: 'agy',
+          receivedAt: now - 8_000
+        })
+
+        await worker.emit('agent.status.changed', {
+          workspaceId: wtId,
+          paneKey: `${tabIdVoice}:leaf-1`,
+          terminalId: termHandleVoice,
+          state: 'working',
+          title: 'agy',
+          receivedAt: now - 4_000
+        })
+
+        const snapWorker = await worker.request('dashboard.get', { forceScan: true })
+        assert.ok(snapWorker.live.agents.length >= 2)
+        const wCardUi = snapWorker.live.agents.find((c) => c.title === '# ui opt')
+        const wCardVoice = snapWorker.live.agents.find((c) => c.title === '#voice name')
+
+        assert.ok(wCardUi, 'Worker dashboard must have # ui opt card')
+        assert.ok(wCardVoice, 'Worker dashboard must have #voice name card')
+        assert.equal(wCardUi?.terminalId, termHandleUi, 'Worker card # ui opt must have termHandleUi')
+        assert.equal(wCardUi?.sessionKey, 'antigravity:sess-ui', 'Worker card # ui opt must have sessionKey sess-ui')
+        assert.equal(wCardVoice?.terminalId, termHandleVoice, 'Worker card #voice name must have termHandleVoice')
+        assert.equal(wCardVoice?.sessionKey, 'antigravity:sess-voice', 'Worker card #voice name must have sessionKey sess-voice')
+      } finally {
+        await worker.deactivate()
+      }
+    } finally {
+      delete process.env.TOKEN_PULSE_HOME_DIR
+      delete process.env.TOKEN_PULSE_ORCA_DATA_DIR
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('elevates parent session state to waiting when any child subagent is working or waiting, reverting to done when subagents finish', () => {
+    const now = Date.now()
+    const wtPath = '/tmp/test-subagent-elevate'
+    const parentId = 'parent-agent-sess'
+    const childId = 'child-subagent-sess'
+
+    // Parent session whose own transcript has ended on done
+    const sParent = createEmptySessionState(parentId, 'codex', `/tmp/${parentId}.jsonl`)
+    sParent.cwd = wtPath
+    sParent.titleHint = 'Parent task'
+    sParent.createdAtMs = now - 60_000
+    sParent.updatedAtMs = now - 10_000
+    sParent.lastMtimeMs = now - 10_000
+    sParent.lastEventState = 'done'
+    sParent.isSubagent = false
+    sParent.turnsByKey.set('t1', {
+      turnKey: 't1',
+      timestampMs: now - 10_000,
+      input: 500,
+      output: 100,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 600,
+      durationSec: 3,
+      tps: 33,
+      model: 'gpt-6.1-sol',
+      explicitCostUsd: null
+    })
+
+    // Child subagent session linked to parentId that is currently working
+    const sChild = createEmptySessionState(childId, 'codex', `/tmp/${childId}.jsonl`)
+    sChild.cwd = wtPath
+    sChild.titleHint = 'Child research'
+    sChild.createdAtMs = now - 30_000
+    sChild.updatedAtMs = now - 2_000
+    sChild.lastMtimeMs = now - 2_000
+    sChild.lastEventState = 'working'
+    sChild.isSubagent = true
+    sChild.parentSessionId = parentId
+    sChild.turnsByKey.set('t1', {
+      turnKey: 't1',
+      timestampMs: now - 2_000,
+      input: 200,
+      output: 50,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 250,
+      durationSec: 1,
+      tps: 50,
+      model: 'gpt-6.1-sol',
+      explicitCostUsd: null
+    })
+
+    const emptyJournal = createTestJournalIndex()
+    const pricing = new PricingEngine()
+    const runtime = {
+      focusedName: 'main',
+      focusedBranch: 'main',
+      focusedPath: wtPath,
+      liveAgents: []
+    }
+
+    // Snap 1: Child is working -> parent card must be 'waiting', session item must have active = true
+    const snap1 = buildDashboardSnapshot([sParent, sChild], emptyJournal, pricing, runtime, now)
+    const pCard1 = snap1.live.agents.find((c) => c.sessionKey === `codex:${parentId}`)
+    const pSess1 = snap1.sessions.find((s) => s.sessionId === parentId)
+
+    assert.ok(pCard1, 'Parent card must be present in snap.live.agents')
+    assert.equal(pCard1?.state, 'waiting', 'Parent card state must be elevated to waiting when child is working')
+    assert.equal(pSess1?.active, true, 'Parent session item in sessions list must be active when child is working')
+
+    // Snap 2: Child is waiting -> parent card must also be 'waiting'
+    sChild.lastEventState = 'waiting'
+    const snap2 = buildDashboardSnapshot([sParent, sChild], emptyJournal, pricing, runtime, now)
+    const pCard2 = snap2.live.agents.find((c) => c.sessionKey === `codex:${parentId}`)
+    assert.equal(pCard2?.state, 'waiting', 'Parent card state must remain waiting when child is waiting')
+
+    // Snap 3: Child is done -> parent card reverts to 'done'
+    sChild.lastEventState = 'done'
+    const snap3 = buildDashboardSnapshot([sParent, sChild], emptyJournal, pricing, runtime, now)
+    const pCard3 = snap3.live.agents.find((c) => c.sessionKey === `codex:${parentId}`)
+    assert.equal(pCard3?.state, 'done', 'Parent card state must revert to done when child finishes')
+  })
+
+  test('binds active terminal PTY to parent session whose turn finished >60s ago when child subagent is active, avoiding duplicate split cards', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-pty-subagent-split-'))
+    try {
+      const wtPath = path.join(tmpRoot, 'repo')
+      fs.mkdirSync(wtPath, { recursive: true })
+
+      const now = Date.now()
+      const wtId = `repo-test::${wtPath}`
+      const ptyId = `${wtId}@@pty1`
+      const parentId = 'parent-agent-sess'
+      const childId = 'child-subagent-sess'
+
+      // Parent session whose turn finished >60s ago (st.lastEventState === 'done', st.updatedAtMs = now - 90_000)
+      const sParent = createEmptySessionState(parentId, 'antigravity', path.join(tmpRoot, `${parentId}.jsonl`))
+      sParent.cwd = wtPath
+      sParent.titleHint = 'Parent prompt task'
+      sParent.createdAtMs = now - 120_000
+      sParent.updatedAtMs = now - 90_000
+      sParent.lastMtimeMs = now - 90_000
+      sParent.lastEventState = 'done'
+      sParent.isSubagent = false
+      sParent.turnsByKey.set('t1', {
+        turnKey: 't1',
+        timestampMs: now - 90_000,
+        input: 5000,
+        output: 500,
+        reasoning: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 5500,
+        durationSec: 4,
+        tps: 125,
+        model: 'gemini-3.8-flash-high',
+        explicitCostUsd: null
+      })
+
+      // Active child subagent session (sChild.lastEventState === 'working')
+      const sChild = createEmptySessionState(childId, 'antigravity', path.join(tmpRoot, `${childId}.jsonl`))
+      sChild.cwd = wtPath
+      sChild.titleHint = 'Child subagent worker'
+      sChild.createdAtMs = now - 30_000
+      sChild.updatedAtMs = now - 5_000
+      sChild.lastMtimeMs = now - 5_000
+      sChild.lastEventState = 'working'
+      sChild.isSubagent = true
+      sChild.parentSessionId = parentId
+      sChild.turnsByKey.set('t1', {
+        turnKey: 't1',
+        timestampMs: now - 5_000,
+        input: 1200,
+        output: 300,
+        reasoning: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 1500,
+        durationSec: 2,
+        tps: 150,
+        model: 'gemini-3.8-flash-high',
+        explicitCostUsd: null
+      })
+
+      const emptyJournal = createTestJournalIndex()
+      const pricing = new PricingEngine()
+      const runtime = {
+        focusedName: 'repo',
+        focusedBranch: 'main',
+        focusedPath: wtPath,
+        liveAgents: [
+          {
+            terminalId: ptyId,
+            title: 'agy',
+            agent: 'antigravity',
+            state: 'working' as const,
+            stateStartedAt: now - 20_000,
+            workspacePath: wtPath
+          }
+        ]
+      }
+
+      const snap = buildDashboardSnapshot([sParent, sChild], emptyJournal, pricing, runtime, now)
+
+      // Verify:
+      // Exactly ONE card exists for the parent session (c.state === 'waiting').
+      const parentCards = snap.live.agents.filter((c) => c.sessionKey === `antigravity:${parentId}`)
+      assert.equal(parentCards.length, 1, 'Exactly ONE card exists for the parent session')
+      assert.equal(parentCards[0].state, 'waiting', 'Parent card state must be waiting while child is working')
+
+      // No duplicate or phantom zero-token PTY fallback card exists with c.state === 'working' and tokens.total === 0.
+      const phantomCards = snap.live.agents.filter(
+        (c) => c.state === 'working' && c.tokens.total === 0
+      )
+      assert.equal(phantomCards.length, 0, 'No duplicate or phantom zero-token PTY fallback card exists')
+
+      // Exactly ONE card exists in live.agents overall
+      assert.equal(snap.live.agents.length, 1, 'Exactly ONE card in snap.live.agents overall')
+
+      // The card has c.terminalId === la.terminalId and correct model and token count.
+      const card = snap.live.agents[0]
+      assert.equal(card.terminalId, ptyId, 'Card must have c.terminalId === la.terminalId')
+      assert.equal(card.modelLabel, 'gemini-3.8-flash-high', 'Card must have correct model label')
+      assert.equal(card.tokens.total, 5500, 'Card must have correct token count')
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
   })
 })

@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { normalizeReasoningLevel } from './journal'
 import type { AgentKind } from './protocol'
 
 export interface ParsedTurnUsage {
@@ -38,6 +39,10 @@ export interface SessionTranscriptState {
   titleHint: string | null
   isInternalHelper: boolean
   isSubagent: boolean
+  parentSessionId: string | null
+  parentMessageUuid: string | null
+  messageUuids: string[]
+  reasoningLevels: string[]
   latestModel: string | null
   createdAtMs: number
   updatedAtMs: number
@@ -70,6 +75,10 @@ export function createEmptySessionState(
     titleHint: null,
     isInternalHelper: false,
     isSubagent: false,
+    parentSessionId: null,
+    parentMessageUuid: null,
+    messageUuids: [],
+    reasoningLevels: [],
     latestModel: null,
     createdAtMs: 0,
     updatedAtMs: 0,
@@ -262,6 +271,29 @@ function touchTimestamps(state: SessionTranscriptState, tsMs: number | null): vo
   }
 }
 
+function recordReasoningLevel(state: SessionTranscriptState, raw: unknown): void {
+  const level = normalizeReasoningLevel(raw)
+  if (level && !state.reasoningLevels.includes(level)) state.reasoningLevels.push(level)
+}
+
+function recordReasoningLevelFromObject(state: SessionTranscriptState, obj: Record<string, unknown>): void {
+  const nestedReasoning = obj.reasoning && typeof obj.reasoning === 'object'
+    ? (obj.reasoning as Record<string, unknown>)
+    : null
+  const threadSettings = obj.thread_settings && typeof obj.thread_settings === 'object'
+    ? (obj.thread_settings as Record<string, unknown>)
+    : null
+  recordReasoningLevel(
+    state,
+    obj.reasoning_effort ??
+      obj.effort ??
+      obj.thinking_level ??
+      obj.thinkingLevel ??
+      nestedReasoning?.effort ??
+      threadSettings?.reasoning_effort
+  )
+}
+
 /**
  * Parses lines from a Claude Code `~/.claude/projects/.../*.jsonl` session transcript.
  */
@@ -277,6 +309,16 @@ export function applyClaudeLines(state: SessionTranscriptState, lines: string[])
     const tsMs = parseIsoMs(obj.timestamp)
     touchTimestamps(state, tsMs)
 
+    const uuid = typeof obj.uuid === 'string' ? obj.uuid.trim() : ''
+    if (uuid && !state.messageUuids.includes(uuid) && state.messageUuids.length < 512) {
+      state.messageUuids.push(uuid)
+    }
+    if (obj.isSidechain === true) {
+      state.isSubagent = true
+      const parentUuid = typeof obj.parentUuid === 'string' ? obj.parentUuid.trim() : ''
+      if (parentUuid) state.parentMessageUuid = parentUuid
+    }
+
     if (typeof obj.cwd === 'string' && obj.cwd.trim()) {
       state.cwd = obj.cwd.trim()
     }
@@ -288,10 +330,13 @@ export function applyClaudeLines(state: SessionTranscriptState, lines: string[])
 
     const entryType = obj.type
     if (entryType === 'api-request') {
-      const params = obj.params as { model?: unknown } | undefined
+      const params = obj.params as
+        | { model?: unknown; output_config?: { effort?: unknown }; effort?: unknown }
+        | undefined
       if (typeof params?.model === 'string' && params.model !== '<synthetic>') {
         state.latestModel = params.model
       }
+      recordReasoningLevel(state, params?.output_config?.effort ?? params?.effort)
       if (tsMs) {
         state.lastInferenceStartMs = tsMs
       }
@@ -329,6 +374,7 @@ export function applyClaudeLines(state: SessionTranscriptState, lines: string[])
       const model = typeof msg.model === 'string' ? msg.model : null
       if (model === '<synthetic>') continue
       if (model) state.latestModel = model
+      recordReasoningLevel(state, model?.match(/\(([^)]+)\)\s*$/)?.[1])
 
       const stopReason = typeof msg.stop_reason === 'string' ? msg.stop_reason : null
       if (stopReason === 'end_turn' || stopReason === 'stop_sequence' || stopReason === 'max_tokens') {
@@ -416,6 +462,8 @@ export function applyCodexLines(state: SessionTranscriptState, lines: string[]):
     const payload = (obj.payload && typeof obj.payload === 'object'
       ? obj.payload
       : {}) as Record<string, unknown>
+    recordReasoningLevelFromObject(state, obj)
+    recordReasoningLevelFromObject(state, payload)
 
     if (topType === 'session_meta') {
       if (typeof payload.cwd === 'string' && payload.cwd.trim()) {
@@ -426,7 +474,10 @@ export function applyCodexLines(state: SessionTranscriptState, lines: string[]):
       } else if (typeof payload.session_id === 'string' && payload.session_id.trim()) {
         state.sessionId = payload.session_id.trim()
       }
-      const source = payload.source as { kind?: unknown; subagent?: unknown } | string | undefined
+      const source = payload.source as
+        | { kind?: unknown; subagent?: unknown }
+        | string
+        | undefined
       const sourceKind =
         typeof source === 'string'
           ? source
@@ -440,6 +491,26 @@ export function applyCodexLines(state: SessionTranscriptState, lines: string[]):
         (source && typeof source === 'object' && 'subagent' in source && Boolean(source.subagent))
       ) {
         state.isSubagent = true
+        const subagent = source && typeof source === 'object' ? source.subagent : null
+        if (subagent && typeof subagent === 'object') {
+          const subagentRecord = subagent as Record<string, unknown>
+          const threadSpawn =
+            subagentRecord.thread_spawn && typeof subagentRecord.thread_spawn === 'object'
+              ? (subagentRecord.thread_spawn as Record<string, unknown>)
+              : null
+          const parentId =
+            subagentRecord.parent_thread_id ??
+            subagentRecord.parent_id ??
+            subagentRecord.parentThreadId ??
+            subagentRecord.parentId ??
+            threadSpawn?.parent_thread_id ??
+            threadSpawn?.parent_id ??
+            threadSpawn?.parentThreadId ??
+            threadSpawn?.parentId
+          if (typeof parentId === 'string' && parentId.trim()) {
+            state.parentSessionId = parentId.trim()
+          }
+        }
       }
       continue
     }
@@ -598,6 +669,7 @@ export function applyAntigravityLines(state: SessionTranscriptState, lines: stri
 
     const tsMs = parseIsoMs(obj.created_at)
     touchTimestamps(state, tsMs)
+    recordReasoningLevelFromObject(state, obj)
 
     const hasNumericIdx = typeof obj.step_index === 'number' && Number.isFinite(obj.step_index)
     const stepIndex = hasNumericIdx ? (obj.step_index as number) : state.turnsByKey.size
@@ -854,6 +926,7 @@ export function parseGeminiSessionJson(
     if (role === 'gemini' || role === 'model' || role === 'assistant') {
       const model = typeof msg.model === 'string' && msg.model.trim() ? msg.model.trim() : null
       if (model) state.latestModel = model
+      recordReasoningLevel(state, model?.match(/\(([^)]+)\)\s*$/)?.[1])
       state.lastEventState = 'done'
 
       const tok = (msg.tokens ?? msg.usageMetadata ?? msg.usage) as

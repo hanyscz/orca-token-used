@@ -20,8 +20,11 @@ import type {
   TimeBucket,
   TokenBreakdown,
   TpsStats,
-  WorktreeSessionItem
+  WorktreeSessionItem,
+  OrcaLiveAgentInfo
 } from './protocol'
+
+export { type OrcaLiveAgentInfo }
 
 export const ALL_AGENTS: readonly AgentKind[] = ['claude', 'codex', 'antigravity', 'gemini']
 
@@ -30,15 +33,6 @@ const DEFAULT_MODEL_DISPLAY: Record<AgentKind, string> = {
   codex: 'gpt-6.1-sol',
   antigravity: 'gemini-3-pro',
   gemini: 'gemini-2.5-pro'
-}
-
-export interface OrcaLiveAgentInfo {
-  terminalId: string | null
-  title: string | null
-  agent: string | null
-  state: AgentRunState
-  stateStartedAt: number
-  workspacePath?: string | null
 }
 
 export interface KnownOrcaWorkspace {
@@ -129,6 +123,7 @@ interface EnrichedSession {
   workspacePath: string | null
   workspaceName: string
   modelLabel: string
+  reasoningLevels: string[]
   providerLabel: string
   tokens: TokenBreakdown
   tps: TpsStats
@@ -143,6 +138,12 @@ function mapOrcaAgentKind(raw: string | null | undefined): AgentKind | null {
   if (s.includes('antigravity')) return 'antigravity'
   if (s.includes('gemini')) return 'gemini'
   return null
+}
+
+function parentSessionKey(agent: AgentKind, parentId: string | null): string | null {
+  const value = parentId?.trim() ?? ''
+  if (!value) return null
+  return value.includes(':') ? value : `${agent}:${value}`
 }
 
 function computeTurnSummary(
@@ -300,8 +301,14 @@ function getEffectiveTerminalTabs(journal: JournalIndex): TerminalTabMeta[] {
 
 function findTerminalTabById(
   tabs: TerminalTabMeta[],
-  terminalId: string | null | undefined
+  terminalId: string | null | undefined,
+  tabId?: string | null
 ): TerminalTabMeta | undefined {
+  const cleanTabId = tabId?.trim()
+  if (cleanTabId) {
+    const tabMatch = tabs.find((t) => t.tabId === cleanTabId)
+    if (tabMatch) return tabMatch
+  }
   if (!terminalId) return undefined
   return tabs.find(
     (t) =>
@@ -536,6 +543,7 @@ function enrichSessions(
       workspacePath,
       workspaceName,
       modelLabel,
+      reasoningLevels: st.reasoningLevels,
       providerLabel,
       tokens: summary.tokens,
       tps: summary.tps,
@@ -779,7 +787,13 @@ export function buildDashboardSnapshot(
     ? enrichedAll.filter((s) => isSameOrChildWorktreePath(s.workspacePath, effectivePathNorm))
     : enrichedAll
 
-  const ptyBySessionKey = matchPtyTerminalsToSessions(userSessions, journal, runtime.liveAgents, now)
+  const ptyBySessionKey = matchPtyTerminalsToSessions(
+    userSessions,
+    journal,
+    runtime.liveAgents,
+    now,
+    enrichedAll
+  )
 
   const sessionsList: WorktreeSessionItem[] = [...worktreeUserSessions]
     .sort((a, b) => b.state.updatedAtMs - a.state.updatedAtMs)
@@ -788,19 +802,26 @@ export function buildDashboardSnapshot(
       const sKey = `${s.state.agent}:${s.state.sessionId}`
       const jMeta = journal.byNativeId.get(s.state.sessionId)
       const matchedPty = ptyBySessionKey.get(sKey)
-      const runState = resolveSessionRunState(
+      let runState = resolveSessionRunState(
         s.state,
         jMeta,
         matchedPty?.state ?? null,
         now,
         matchedPty?.stateStartedAt ?? 0
       )
+      if (
+        runState === 'done' &&
+        hasActiveChildSubagent(s.state.agent, s.state.sessionId, enrichedAll, journal, now)
+      ) {
+        runState = 'waiting'
+      }
       const active = runState === 'working' || runState === 'waiting' || runState === 'blocked'
       return {
         sessionId: s.state.sessionId,
         agent: s.state.agent,
         providerLabel: s.providerLabel,
         modelLabel: s.modelLabel,
+        reasoningLevels: s.reasoningLevels,
         title: s.title,
         projectName: s.projectName,
         workspaceName: s.workspaceName,
@@ -821,7 +842,23 @@ export function buildDashboardSnapshot(
     effectivePathNorm,
     effectiveProject,
     effectiveName,
-    now
+    now,
+    allSessions: enrichedAll
+  })
+  const subagentSessions = effectivePathNorm
+    ? enrichedAll.filter(
+        (s) => s.isSubagent && isSameOrChildWorktreePath(s.workspacePath, effectivePathNorm)
+      )
+    : enrichedAll.filter((s) => s.isSubagent)
+  const subagentCards = buildLiveAgentCards({
+    userSessions: subagentSessions,
+    journal,
+    runtime: { ...runtime, liveAgents: [] },
+    effectivePathNorm,
+    effectiveProject,
+    effectiveName,
+    now,
+    allSessions: enrichedAll
   })
 
   const liveTokens = emptyTokenBreakdown()
@@ -904,7 +941,8 @@ export function buildDashboardSnapshot(
         avgTps: avgAcrossLive,
         peakTps: +maxPeakTps.toFixed(1)
       },
-      agents: liveCards
+      agents: liveCards,
+      subagents: subagentCards
     },
     sessions: sessionsList,
     periods: {
@@ -983,6 +1021,46 @@ export function resolveSessionRunState(
   return 'done'
 }
 
+function hasActiveChildSubagent(
+  parentAgent: AgentKind,
+  parentSessionId: string,
+  allSessions: Iterable<EnrichedSession> | undefined,
+  journal: JournalIndex,
+  now: number,
+  cards?: LiveAgentCard[]
+): boolean {
+  const pKey = `${parentAgent}:${parentSessionId}`
+  if (allSessions) {
+    for (const sub of allSessions) {
+      if (!sub.isSubagent) continue
+      const rawParent = sub.state.parentSessionId?.trim() ?? ''
+      if (!rawParent) continue
+      const matches =
+        rawParent === parentSessionId ||
+        rawParent === pKey ||
+        parentSessionKey(sub.state.agent, sub.state.parentSessionId) === pKey
+      if (!matches) continue
+
+      const jMeta = journal.byNativeId.get(sub.state.sessionId)
+      const subState = resolveSessionRunState(sub.state, jMeta, null, now)
+      if (subState === 'working' || subState === 'waiting') {
+        return true
+      }
+    }
+  }
+  if (cards) {
+    for (const c of cards) {
+      const matches =
+        c.parentSessionKey === pKey ||
+        c.parentSessionKey === parentSessionId
+      if (matches && (c.state === 'working' || c.state === 'waiting')) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
 function isRealPtyAgentEntry(la: OrcaLiveAgentInfo, hasJournalRecords: boolean): boolean {
   const tid = typeof la.terminalId === 'string' ? la.terminalId.trim() : ''
   if (!tid) {
@@ -1000,7 +1078,8 @@ function canBindPtyToCliSession(
   mappedKind: AgentKind | null,
   termWsPath: string | null,
   journal: JournalIndex,
-  now: number
+  now: number,
+  allSessions?: EnrichedSession[]
 ): boolean {
   const jMeta = journal.byNativeId.get(s.state.sessionId)
   if (jMeta) {
@@ -1021,15 +1100,28 @@ function canBindPtyToCliSession(
     }
   }
   const lastTouchMs = Math.max(s.state.updatedAtMs || 0, s.state.lastMtimeMs || 0)
+  const hasActiveChildren = hasActiveChildSubagent(
+    s.state.agent,
+    s.state.sessionId,
+    allSessions,
+    journal,
+    now
+  )
   // Never bind an active `working` PTY onto an old CLI transcript that already finished >60s ago
-  if (la.state === 'working' && s.state.lastEventState === 'done' && now - lastTouchMs > 60_000) {
+  // unless the parent has active child subagents running
+  if (
+    la.state === 'working' &&
+    s.state.lastEventState === 'done' &&
+    !hasActiveChildren &&
+    now - lastTouchMs > 60_000
+  ) {
     return false
   }
   // If `terminalId` had no workspace path (e.g. synthetic ID), require recent activity within 15m
-  if (!termWsPath && now - lastTouchMs > 15 * 60_000) {
+  if (!termWsPath && !hasActiveChildren && now - lastTouchMs > 15 * 60_000) {
     return false
   }
-  return lastTouchMs >= now - 6 * 3600_000
+  return hasActiveChildren || lastTouchMs >= now - 6 * 3600_000
 }
 
 function selectBestSessionForPty(
@@ -1040,22 +1132,23 @@ function selectBestSessionForPty(
   mappedKind: AgentKind | null,
   termWsPath: string | null,
   journal: JournalIndex,
-  now: number
+  now: number,
+  allSessions?: EnrichedSession[]
 ): EnrichedSession | undefined {
   if (matchedTab) {
     const prebound = sortedByRecent.find((s) => {
       const sKey = `${s.state.agent}:${s.state.sessionId}`
       if (claimedKeys.has(sKey)) return false
       if (s.matchedTab !== matchedTab) return false
-      return canBindPtyToCliSession(s, la, mappedKind, termWsPath, journal, now)
+      return canBindPtyToCliSession(s, la, mappedKind, termWsPath, journal, now, allSessions)
     })
     if (prebound) return prebound
   }
   return sortedByRecent.find((s) => {
     const sKey = `${s.state.agent}:${s.state.sessionId}`
     if (claimedKeys.has(sKey)) return false
-    if (matchedTab && s.matchedTab && s.matchedTab !== matchedTab) return false
-    return canBindPtyToCliSession(s, la, mappedKind, termWsPath, journal, now)
+    if (s.matchedTab && s.matchedTab !== matchedTab) return false
+    return canBindPtyToCliSession(s, la, mappedKind, termWsPath, journal, now, allSessions)
   })
 }
 
@@ -1063,7 +1156,8 @@ function matchPtyTerminalsToSessions(
   userSessions: EnrichedSession[],
   journal: JournalIndex,
   liveAgents: OrcaLiveAgentInfo[],
-  now: number
+  now: number,
+  allSessions?: EnrichedSession[]
 ): Map<string, OrcaLiveAgentInfo> {
   const recentLiveCutoffMs = now - 15 * 60_000
   const hasJournalRecords = journal.byNativeId.size > 0
@@ -1079,7 +1173,7 @@ function matchPtyTerminalsToSessions(
     if (la.state === 'done' && la.stateStartedAt > 0 && la.stateStartedAt < recentLiveCutoffMs) {
       continue
     }
-    const matchedTab = findTerminalTabById(terminalTabs, la.terminalId)
+    const matchedTab = findTerminalTabById(terminalTabs, la.terminalId, la.tabId)
     const mappedKind =
       mapOrcaAgentKind(la.agent) ??
       matchedTab?.agent ??
@@ -1096,7 +1190,8 @@ function matchPtyTerminalsToSessions(
       mappedKind,
       termWsPath,
       journal,
-      now
+      now,
+      allSessions
     )
     if (matched) {
       const sKey = `${matched.state.agent}:${matched.state.sessionId}`
@@ -1384,6 +1479,7 @@ function buildLiveAgentCards(params: {
   effectiveProject: string | null
   effectiveName: string | null
   now: number
+  allSessions?: EnrichedSession[]
 }): LiveAgentCard[] {
   const {
     userSessions,
@@ -1392,7 +1488,8 @@ function buildLiveAgentCards(params: {
     effectivePathNorm,
     effectiveProject,
     effectiveName,
-    now
+    now,
+    allSessions
   } = params
   const recentLiveCutoffMs = now - 15 * 60_000
   const sortedByRecent = [...userSessions].sort(
@@ -1421,7 +1518,7 @@ function buildLiveAgentCards(params: {
       continue
     }
 
-    const matchedTab = findTerminalTabById(terminalTabs, la.terminalId)
+    const matchedTab = findTerminalTabById(terminalTabs, la.terminalId, la.tabId)
     const mappedKind =
       mapOrcaAgentKind(la.agent) ??
       matchedTab?.agent ??
@@ -1441,19 +1538,31 @@ function buildLiveAgentCards(params: {
       mappedKind,
       termWsPath,
       journal,
-      now
+      now,
+      allSessions
     )
 
     if (matchedSession) {
       const sKey = `${matchedSession.state.agent}:${matchedSession.state.sessionId}`
       claimedSessionKeys.add(sKey)
-      const resolvedState = resolveSessionRunState(
+      let resolvedState = resolveSessionRunState(
         matchedSession.state,
         undefined,
         la.state,
         now,
         la.stateStartedAt || 0
       )
+      if (
+        hasActiveChildSubagent(
+          matchedSession.state.agent,
+          matchedSession.state.sessionId,
+          allSessions,
+          journal,
+          now
+        )
+      ) {
+        resolvedState = 'waiting'
+      }
       const isWorking = resolvedState === 'working'
       const activeStartHint = computeActiveTurnStartHint(matchedSession.state, undefined, la)
       const io = compute60sIoSeries(
@@ -1473,9 +1582,15 @@ function buildLiveAgentCards(params: {
       cards.push({
         id: la.terminalId || sKey,
         sessionKey: sKey,
+        parentSessionKey: parentSessionKey(
+          matchedSession.state.agent,
+          matchedSession.state.parentSessionId
+        ),
+        terminalId: la.terminalId,
         agent: matchedSession.state.agent,
         providerLabel: matchedSession.providerLabel,
         modelLabel: matchedSession.modelLabel,
+        reasoningLevels: matchedSession.reasoningLevels,
         state: resolvedState,
         title: ptyCustomTitle || matchedSession.title,
         projectName: matchedSession.projectName,
@@ -1520,9 +1635,12 @@ function buildLiveAgentCards(params: {
       cards.push({
         id: la.terminalId || fallbackKey,
         sessionKey: fallbackKey,
+        parentSessionKey: null,
+        terminalId: la.terminalId,
         agent: mappedKind,
         providerLabel: providerLabelForAgent(mappedKind, fallbackModel),
         modelLabel: fallbackModel,
+        reasoningLevels: [],
         state: la.state,
         title: zeroTurnTitle,
         projectName: resolvedWs.projectName ?? effectiveProject,
@@ -1552,14 +1670,25 @@ function buildLiveAgentCards(params: {
     if (claimedSessionKeys.has(sKey)) continue
     const jMeta = journal.byNativeId.get(s.state.sessionId)
     if (s.tokens.total <= 0 && !jMeta?.isTurnOpen) continue
+    const hasActiveChild = hasActiveChildSubagent(
+      s.state.agent,
+      s.state.sessionId,
+      allSessions,
+      journal,
+      now
+    )
     const isRecentlyActive =
       Boolean(jMeta?.isTurnOpen) ||
       Boolean(jMeta?.isLiveLease) ||
+      hasActiveChild ||
       s.state.updatedAtMs >= recentLiveCutoffMs
     if (!isRecentlyActive) continue
 
     claimedSessionKeys.add(sKey)
-    const state = resolveSessionRunState(s.state, jMeta, null, now)
+    let state = resolveSessionRunState(s.state, jMeta, null, now)
+    if (hasActiveChild) {
+      state = 'waiting'
+    }
     const isWorking = state === 'working'
     const activeStartHint = computeActiveTurnStartHint(s.state, jMeta, null)
     const io = compute60sIoSeries(s.state.turnsByKey.values(), isWorking, now, activeStartHint)
@@ -1574,9 +1703,12 @@ function buildLiveAgentCards(params: {
     cards.push({
       id: sKey,
       sessionKey: sKey,
+      parentSessionKey: parentSessionKey(s.state.agent, s.state.parentSessionId),
+      terminalId: null,
       agent: s.state.agent,
       providerLabel: s.providerLabel,
       modelLabel: s.modelLabel,
+      reasoningLevels: s.reasoningLevels,
       state,
       title: s.title,
       projectName: s.projectName,
@@ -1632,7 +1764,6 @@ export function pollSingleLiveAgent(
   const enrichedAll = enrichSessions(hotRaw, journal, pricing, indexedWorkspaces)
   const userSessions = enrichedAll.filter((s) => !s.isSubagent)
   const focusedPathNorm = normalizeFsPath(runtime.focusedPath)
-
   const liveCards = buildLiveAgentCards({
     userSessions,
     journal,
@@ -1640,7 +1771,8 @@ export function pollSingleLiveAgent(
     effectivePathNorm: focusedPathNorm,
     effectiveProject: runtime.focusedProject ?? null,
     effectiveName: runtime.focusedName ?? null,
-    now
+    now,
+    allSessions: enrichedAll
   })
 
   const terminalLookupId = sessionKey.startsWith('terminal:')
@@ -1661,7 +1793,18 @@ export function pollSingleLiveAgent(
   if (!fallback) return null
 
   const jMeta = journal.byNativeId.get(fallback.state.sessionId)
-  const state = resolveSessionRunState(fallback.state, jMeta, null, now)
+  let state = resolveSessionRunState(fallback.state, jMeta, null, now)
+  if (
+    hasActiveChildSubagent(
+      fallback.state.agent,
+      fallback.state.sessionId,
+      enrichedAll,
+      journal,
+      now
+    )
+  ) {
+    state = 'waiting'
+  }
   const isWorking = state === 'working'
   const activeStartHint = computeActiveTurnStartHint(fallback.state, jMeta, null)
   const io = compute60sIoSeries(
@@ -1674,9 +1817,12 @@ export function pollSingleLiveAgent(
   return {
     id: sKey,
     sessionKey: sKey,
+    parentSessionKey: parentSessionKey(fallback.state.agent, fallback.state.parentSessionId),
+    terminalId: null,
     agent: fallback.state.agent,
     providerLabel: fallback.providerLabel,
     modelLabel: fallback.modelLabel,
+    reasoningLevels: fallback.reasoningLevels,
     state,
     title: fallback.title,
     projectName: fallback.projectName,

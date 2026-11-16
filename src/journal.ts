@@ -60,6 +60,7 @@ export interface TerminalTabMeta {
 
 export interface AntigravityConversationSummaryMeta {
   conversationId: string
+  parentConversationId: string | null
   title: string | null
   workspacePath: string | null
   workspacePaths: string[]
@@ -187,20 +188,12 @@ function listCandidateProfileStateDbs(orcaDir: string): string[] {
     // Fallback to local-default
   }
 
-  const candidateDbs: string[] = [path.join(orcaDir, 'profiles', profileId, 'profile-state.db')]
-  const profilesRoot = path.join(orcaDir, 'profiles')
-  try {
-    if (fs.existsSync(profilesRoot)) {
-      for (const ent of fs.readdirSync(profilesRoot, { withFileTypes: true })) {
-        if (ent.isDirectory() && ent.name !== profileId) {
-          candidateDbs.push(path.join(profilesRoot, ent.name, 'profile-state.db'))
-        }
-      }
-    }
-  } catch {
-    // Ignore
+  if (path.basename(profileId) !== profileId || profileId === '.' || profileId === '..') {
+    profileId = 'local-default'
   }
-  return candidateDbs
+
+  // Read only the active profile. Other profiles may contain unrelated user data.
+  return [path.join(orcaDir, 'profiles', profileId, 'profile-state.db')]
 }
 
 /**
@@ -267,6 +260,87 @@ export function readOrcaActiveWorktreeSelection(
   }
 
   return empty
+}
+
+export function readProfileStateTerminalToTabId(
+  orcaDirs = defaultOrcaAppDataDirs()
+): Map<string, string> {
+  const map = new Map<string, string>()
+  const DatabaseSyncCtor = loadSqliteConstructor()
+  if (!DatabaseSyncCtor) return map
+
+  for (const orcaDir of orcaDirs) {
+    for (const dbPath of listCandidateProfileStateDbs(orcaDir)) {
+      if (!fs.existsSync(dbPath)) continue
+      let db: SqliteReadOnlyDb | null = null
+      try {
+        db = new DatabaseSyncCtor(dbPath, { readOnly: true, timeout: 300 })
+        const tabRows = db
+          .prepare(
+            "SELECT part_key, payload FROM profile_state_document_parts WHERE domain = 'workspaceSession' AND (part_key LIKE '[\"tabsByWorktree\",%' OR part_key LIKE '[\"unifiedTabs\",%')"
+          )
+          .all() as Array<{ part_key?: string; payload?: string }>
+
+        for (const r of tabRows) {
+          if (!r?.part_key || !r.payload) continue
+          let arr: unknown
+          try {
+            arr = JSON.parse(r.payload)
+          } catch {
+            continue
+          }
+          if (!Array.isArray(arr)) continue
+
+          if (r.part_key.startsWith('["unifiedTabs",')) {
+            for (const item of arr) {
+              if (!item || typeof item !== 'object') continue
+              const u = item as Record<string, unknown>
+              const tabId = typeof u.id === 'string' ? u.id.trim() : ''
+              const entityId = typeof u.entityId === 'string' ? u.entityId.trim() : ''
+              if (tabId) {
+                map.set(tabId, tabId)
+                if (entityId) map.set(entityId, tabId)
+              }
+            }
+          } else if (r.part_key.startsWith('["tabsByWorktree",')) {
+            for (const item of arr) {
+              if (!item || typeof item !== 'object') continue
+              const t = item as Record<string, unknown>
+              const tabId = typeof t.id === 'string' ? t.id.trim() : ''
+              const ptyId = typeof t.ptyId === 'string' ? t.ptyId.trim() : ''
+              const terminalId = typeof t.terminalId === 'string' ? t.terminalId.trim() : ''
+              if (tabId) {
+                map.set(tabId, tabId)
+                if (ptyId) map.set(ptyId, tabId)
+                if (terminalId) map.set(terminalId, tabId)
+                if (Array.isArray(t.terminals)) {
+                  for (const sub of t.terminals) {
+                    if (sub && typeof sub === 'object') {
+                      const stId =
+                        typeof (sub as { id?: unknown }).id === 'string'
+                          ? (sub as { id: string }).id.trim()
+                          : ''
+                      if (stId) map.set(stId, tabId)
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore locked or corrupt profile-state.db
+      } finally {
+        try {
+          db?.close()
+        } catch {
+          // Ignore close error
+        }
+      }
+    }
+  }
+
+  return map
 }
 
 function mapProviderToAgent(provider: unknown): AgentKind | null {
@@ -388,6 +462,25 @@ export function normalizeConfiguredModelSlug(raw: unknown): string | null {
     s = s.toLowerCase().replace(/\s+/g, '-')
   }
   return s
+}
+
+export function normalizeReasoningLevel(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const value = raw.trim().toLowerCase().replace(/[_-]+/g, ' ')
+  if (!value) return null
+  const aliases: Record<string, string> = {
+    xhigh: 'XHigh',
+    'extra high': 'XHigh',
+    high: 'High',
+    medium: 'Medium',
+    med: 'Medium',
+    low: 'Low',
+    minimal: 'Minimal',
+    none: 'None',
+    adaptive: 'Adaptive',
+    max: 'Max'
+  }
+  return aliases[value] ?? value.replace(/\b\w/g, (ch) => ch.toUpperCase())
 }
 
 function readLocalCliConfiguredModels(
@@ -630,7 +723,7 @@ function readAntigravityMetadata(
       try {
         db = new DatabaseCtor(dbPath, { readOnly: true, timeout: 300 })
 
-        const parentedIds = new Set<string>()
+        const parentByChildId = new Map<string, string>()
         try {
           const pRows = db.prepare('SELECT * FROM conversation_parents').all()
           for (const pr of pRows) {
@@ -642,7 +735,7 @@ function readAntigravityMetadata(
               typeof parentId === 'string' &&
               parentId.trim()
             ) {
-              parentedIds.add(childId.trim())
+              parentByChildId.set(childId.trim(), parentId.trim())
             }
           }
         } catch {
@@ -680,13 +773,15 @@ function readAntigravityMetadata(
           const rowUpdatedMs = parseJournalTimestampMs(r.last_modified_time ?? r.updated_at)
           const parentCol =
             typeof r.parent_conversation_id === 'string' ? r.parent_conversation_id.trim() : ''
+          const parentConversationId = parentCol || parentByChildId.get(convId) || null
           const depthNum = Number(r.nesting_depth) || 0
-          const rowIsSubagent = parentedIds.has(convId) || parentCol.length > 0 || depthNum > 0
+          const rowIsSubagent = Boolean(parentConversationId || depthNum > 0)
 
           const existing = summaries.get(convId)
           if (!existing) {
             summaries.set(convId, {
               conversationId: convId,
+              parentConversationId,
               title: cleanTitle,
               workspacePath: decoded.primary,
               workspacePaths: decoded.all,
@@ -721,6 +816,9 @@ function readAntigravityMetadata(
             }
             summaries.set(convId, {
               conversationId: convId,
+              parentConversationId: isNewer
+                ? parentConversationId || existing.parentConversationId
+                : existing.parentConversationId || parentConversationId,
               title: isNewer ? cleanTitle || existing.title : existing.title || cleanTitle,
               workspacePath: mergedPrimary,
               workspacePaths: mergedPaths,
