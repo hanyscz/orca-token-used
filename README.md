@@ -15,8 +15,10 @@ The plugin uses Orca's `trusted-worker` profile. Orca will show the requested ac
 ## Features
 
 - Live output and input token rates with 60-second waveforms.
-- Session, day, week, and month token summaries.
-- Claude Code, Codex, Gemini CLI, and Antigravity transcript parsing.
+- Session, day, week, and month token summaries, plus today's cumulative cost in the live dashboard.
+- Claude Code, Codex, Gemini CLI, and Antigravity transcript parsing with provider logos and reasoning effort badges.
+- Nested subagent cards under parent sessions with parent status elevation while child subagents are active, plus collapsible session groups.
+- Terminal tab and handoff title synchronization across CLI sessions, with click-to-focus terminal navigation.
 - Current model labels and provider-aware USD estimates.
 - Online pricing refresh from OpenRouter and models.dev, with offline built-in rates.
 - Light and dark Orca themes.
@@ -80,10 +82,10 @@ The plugin requires Orca `>=1.4.248`.
 Release a new version with:
 
 ```bash
-scripts/publish-plugin.sh 0.1.1
+scripts/publish-plugin.sh 0.1.2
 ```
 
-The script updates the manifest version, validates and tests the plugin, commits the release, pushes `main`, creates the matching `v0.1.1` tag, and prints the Orca directory URL.
+The script updates the manifest version, validates and tests the plugin, commits the release, pushes `main`, creates the matching `v0.1.2` tag, and prints the Orca directory URL.
 
 ## License
 
