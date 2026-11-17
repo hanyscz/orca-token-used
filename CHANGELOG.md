@@ -2,6 +2,11 @@
 
 All notable changes to Token Pulse are documented in this file.
 
+## [0.1.5] - 2026-11-17
+
+### Fixed
+- **Current model & reasoning badge sync on `/model` switch**: Preferred `st.latestModel` over historical token-weighted `summary.topModel` when journal `model` is absent (CLI sessions), and extracted Antigravity model reasoning effort suffixes (`-minimal`/`-low`/`-medium`/`-high`/`-xhigh`/`-max`) while keeping the latest reasoning level active.
+
 ## [0.1.4] - 2026-11-17
 
 ### Added
