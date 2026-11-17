@@ -310,10 +310,22 @@ function recordReasoningLevelFromObject(state: SessionTranscriptState, obj: Reco
   )
 }
 
+const RAW_UUID_PATTERN =
+  /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$|^[0-9a-f]{32}$/i
+
 function cleanNonEmptyString(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
   const trimmed = raw.trim()
   return trimmed ? trimmed : undefined
+}
+
+/**
+ * Normalizes a subagent name or role label, discarding empty strings and raw UUID-like values.
+ */
+export function cleanSubagentLabel(raw: unknown): string | null {
+  const cleaned = cleanNonEmptyString(raw)
+  if (!cleaned || RAW_UUID_PATTERN.test(cleaned)) return null
+  return cleaned
 }
 
 function setBoundedMapEntry<K, V>(map: Map<K, V>, key: K, value: V, maxEntries = 512): void {
@@ -325,7 +337,7 @@ function setBoundedMapEntry<K, V>(map: Map<K, V>, key: K, value: V, maxEntries =
 }
 
 function deriveCodexSubagentRole(rawRole: unknown, rawPath: unknown): string | null {
-  const role = cleanNonEmptyString(rawRole)
+  const role = cleanSubagentLabel(rawRole)
   if (role && role.toLowerCase() !== 'default') {
     return role
   }
@@ -334,7 +346,7 @@ function deriveCodexSubagentRole(rawRole: unknown, rawPath: unknown): string | n
     const normalized = rawPathStr.replace(/\\/g, '/').replace(/\/+$/, '')
     if (normalized && normalized !== '/root' && normalized !== 'root') {
       const base = path.posix.basename(normalized).trim()
-      if (base && base !== '.' && base !== '..' && base !== '/') {
+      if (base && base !== '.' && base !== '..' && base !== '/' && !RAW_UUID_PATTERN.test(base)) {
         return base
       }
     }
@@ -359,8 +371,8 @@ function recordClaudeSpawnedToolUses(
       ? (b.input as Record<string, unknown>)
       : {}
     const meta: SpawnedSubagentMeta = {}
-    const name = cleanNonEmptyString(input.name)
-    const role = cleanNonEmptyString(input.subagent_type ?? input.subagentType)
+    const name = cleanSubagentLabel(input.name)
+    const role = cleanSubagentLabel(input.subagent_type ?? input.subagentType)
     const description = cleanNonEmptyString(input.description)
     if (name) meta.name = name
     if (role) meta.role = role
@@ -428,9 +440,11 @@ function recordClaudeToolUseResult(
     }
   }
 
-  const name = callMeta?.name ?? cleanNonEmptyString(tur.name)
+  const name = callMeta?.name ?? cleanSubagentLabel(tur.name) ?? undefined
   const role =
-    callMeta?.role ?? cleanNonEmptyString(tur.subagent_type ?? tur.subagentType ?? tur.agentType)
+    callMeta?.role ??
+    cleanSubagentLabel(tur.subagent_type ?? tur.subagentType ?? tur.agentType) ??
+    undefined
   const description = callMeta?.description ?? cleanNonEmptyString(tur.description)
 
   state.spawnedSubagentsByAgentId ??= {}
@@ -677,15 +691,15 @@ export function applyCodexLines(state: SessionTranscriptState, lines: string[]):
       }
       if (!state.isInternalHelper) {
         const subagentName =
-          cleanNonEmptyString(payload.agent_nickname) ??
-          cleanNonEmptyString(threadSpawn?.agent_nickname) ??
-          cleanNonEmptyString(subagentRecord?.agent_nickname)
+          cleanSubagentLabel(payload.agent_nickname) ??
+          cleanSubagentLabel(threadSpawn?.agent_nickname) ??
+          cleanSubagentLabel(subagentRecord?.agent_nickname)
         if (subagentName) state.subagentName = subagentName
 
         const rawRole = [
-          cleanNonEmptyString(payload.agent_role),
-          cleanNonEmptyString(threadSpawn?.agent_role),
-          cleanNonEmptyString(subagentRecord?.agent_role)
+          cleanSubagentLabel(payload.agent_role),
+          cleanSubagentLabel(threadSpawn?.agent_role),
+          cleanSubagentLabel(subagentRecord?.agent_role)
         ].find((r) => r && r.toLowerCase() !== 'default')
         const rawPath =
           cleanNonEmptyString(payload.agent_path) ??

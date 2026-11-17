@@ -3543,3 +3543,700 @@ describe('Quotas & Limits Tab UI Rendering (renderDashboardShellHtml)', () => {
     assert.ok(creditsMatch[1].includes('14d'), `expected 14d in credits pill, got: ${creditsMatch[1]}`)
   })
 })
+
+describe('Readable Subagent Titles & Metadata Wiring', () => {
+  test('Antigravity subagent displays agentName (verifier, backend) instead of hex ID while parent title stays intact', () => {
+    const now = Date.parse('2026-11-17T10:00:00.000Z')
+    const wtPath = '/Users/dev/orca-subagent-ag'
+
+    const parent = createEmptySessionState(
+      '11111111-parent-ag',
+      'antigravity',
+      '/Users/dev/.gemini/antigravity-cli/brain/11111111-parent-ag/.system_generated/logs/transcript.jsonl'
+    )
+    parent.cwd = wtPath
+    parent.titleHint = 'Coordinate swarm work'
+    parent.updatedAtMs = now - 5_000
+    parent.turnsByKey.set('t-parent', {
+      turnKey: 't-parent',
+      timestampMs: now - 5_000,
+      input: 1000,
+      output: 200,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 1200,
+      durationSec: 2,
+      tps: 100,
+      model: 'gemini-4-carbon',
+      explicitCostUsd: null
+    })
+
+    const subVerifier = createEmptySessionState(
+      '7a8b9c0d-1111-2222-3333-444455556666',
+      'antigravity',
+      '/Users/dev/.gemini/antigravity-cli/brain/7a8b9c0d-1111-2222-3333-444455556666/.system_generated/logs/transcript.jsonl'
+    )
+    subVerifier.cwd = wtPath
+    subVerifier.isSubagent = true
+    subVerifier.parentSessionId = '11111111-parent-ag'
+    subVerifier.titleHint = 'You are verifier, one agent in a swarm...'
+    subVerifier.updatedAtMs = now - 3_000
+    subVerifier.turnsByKey.set('t-ver', {
+      turnKey: 't-ver',
+      timestampMs: now - 3_000,
+      input: 800,
+      output: 150,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 950,
+      durationSec: 1.5,
+      tps: 100,
+      model: 'gemini-4-carbon',
+      explicitCostUsd: null
+    })
+
+    const subBackend = createEmptySessionState(
+      '9e8d7c6b-1111-2222-3333-444455556666',
+      'antigravity',
+      '/Users/dev/.gemini/antigravity-cli/brain/9e8d7c6b-1111-2222-3333-444455556666/.system_generated/logs/transcript.jsonl'
+    )
+    subBackend.cwd = wtPath
+    subBackend.isSubagent = true
+    subBackend.parentSessionId = '11111111-parent-ag'
+    subBackend.updatedAtMs = now - 2_000
+    subBackend.turnsByKey.set('t-be', {
+      turnKey: 't-be',
+      timestampMs: now - 2_000,
+      input: 600,
+      output: 120,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 720,
+      durationSec: 1.2,
+      tps: 100,
+      model: 'gemini-4-carbon',
+      explicitCostUsd: null
+    })
+
+    const journal = createTestJournalIndex({
+      antigravitySummaries: new Map([
+        [
+          '11111111-parent-ag',
+          {
+            conversationId: '11111111-parent-ag',
+            parentConversationId: null,
+            title: 'Swarm Coordinator Session',
+            agentName: 'coordinator',
+            workspacePath: wtPath,
+            workspacePaths: [wtPath],
+            isSubagent: false,
+            updatedAtMs: now - 5_000
+          }
+        ],
+        [
+          '7a8b9c0d-1111-2222-3333-444455556666',
+          {
+            conversationId: '7a8b9c0d-1111-2222-3333-444455556666',
+            parentConversationId: '11111111-parent-ag',
+            title: null,
+            agentName: 'verifier',
+            workspacePath: wtPath,
+            workspacePaths: [wtPath],
+            isSubagent: true,
+            updatedAtMs: now - 3_000
+          }
+        ],
+        [
+          '9e8d7c6b-1111-2222-3333-444455556666',
+          {
+            conversationId: '9e8d7c6b-1111-2222-3333-444455556666',
+            parentConversationId: '11111111-parent-ag',
+            title: null,
+            agentName: 'backend',
+            workspacePath: wtPath,
+            workspacePaths: [wtPath],
+            isSubagent: true,
+            updatedAtMs: now - 2_000
+          }
+        ]
+      ])
+    })
+
+    const snap = buildDashboardSnapshot(
+      [parent, subVerifier, subBackend],
+      journal,
+      new PricingEngine(),
+      {
+        focusedName: 'main',
+        focusedBranch: 'main',
+        focusedPath: wtPath,
+        liveAgents: []
+      },
+      now
+    )
+
+    const parentCard = snap.live.agents.find((c) => c.sessionKey === 'antigravity:11111111-parent-ag')
+    assert.equal(parentCard?.title, 'Swarm Coordinator Session')
+    assert.equal(snap.sessions[0]?.title, 'Swarm Coordinator Session')
+
+    const verifierCard = snap.live.subagents.find(
+      (c) => c.sessionKey === 'antigravity:7a8b9c0d-1111-2222-3333-444455556666'
+    )
+    const backendCard = snap.live.subagents.find(
+      (c) => c.sessionKey === 'antigravity:9e8d7c6b-1111-2222-3333-444455556666'
+    )
+    assert.equal(verifierCard?.title, 'verifier')
+    assert.equal(backendCard?.title, 'backend')
+  })
+
+  test('Codex thread_spawn subagent displays agent_path/agent_role + agent_nickname (e.g. premortem_merge · Linnaeus) while parent stays untouched', () => {
+    const now = Date.parse('2026-11-17T10:05:00.000Z')
+    const wtPath = '/Users/dev/orca-subagent-codex'
+
+    const parent = createEmptySessionState('codex-parent-1', 'codex', '/tmp/codex-parent.jsonl')
+    parent.cwd = wtPath
+    parent.titleHint = 'Run premortem merge check'
+    parent.updatedAtMs = now - 6_000
+    parent.turnsByKey.set('t-p', {
+      turnKey: 't-p',
+      timestampMs: now - 6_000,
+      input: 1200,
+      output: 300,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 1500,
+      durationSec: 2,
+      tps: 150,
+      model: 'gpt-6.1-sol',
+      explicitCostUsd: null
+    })
+
+    const child = createEmptySessionState('codex-sub-raw', 'codex', '/tmp/codex-sub.jsonl')
+    applyCodexLines(child, [
+      JSON.stringify({
+        timestamp: new Date(now - 10_000).toISOString(),
+        type: 'session_meta',
+        payload: {
+          id: '019a0c6d-1111-2222-3333-444455556666',
+          cwd: wtPath,
+          source: {
+            subagent: {
+              thread_spawn: {
+                parent_thread_id: 'codex-parent-1',
+                agent_path: '/root/premortem_merge',
+                agent_role: 'default',
+                agent_nickname: 'Linnaeus'
+              }
+            }
+          }
+        }
+      }),
+      JSON.stringify({
+        timestamp: new Date(now - 9_000).toISOString(),
+        type: 'turn_context',
+        payload: { cwd: wtPath, model: 'gpt-6.1-sol' }
+      }),
+      JSON.stringify({
+        timestamp: new Date(now - 9_000).toISOString(),
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'Merge premortem findings into checklist' }
+      }),
+      JSON.stringify({
+        timestamp: new Date(now - 4_000).toISOString(),
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: { total_tokens: 900 },
+            last_token_usage: { input_tokens: 700, cached_input_tokens: 0, output_tokens: 200 }
+          }
+        }
+      })
+    ])
+
+    const snap = buildDashboardSnapshot(
+      [parent, child],
+      createTestJournalIndex(),
+      new PricingEngine(),
+      {
+        focusedName: 'main',
+        focusedBranch: 'main',
+        focusedPath: wtPath,
+        liveAgents: []
+      },
+      now
+    )
+
+    const parentCard = snap.live.agents.find((c) => c.sessionKey === 'codex:codex-parent-1')
+    assert.equal(parentCard?.title, 'Run premortem merge check')
+    assert.equal(snap.sessions.find((s) => s.sessionId === 'codex-parent-1')?.title, 'Run premortem merge check')
+
+    const subCard = snap.live.subagents.find(
+      (c) => c.sessionKey === 'codex:019a0c6d-1111-2222-3333-444455556666'
+    )
+    assert.equal(subCard?.title, 'premortem_merge · Linnaeus')
+  })
+
+  test('Claude subagent displays parent Task/Agent description + subagent_type, works when parent is outside hotRaw, and falls back to .meta.json agentType when parent is absent', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-claude-subagent-titles-'))
+    try {
+      const now = Date.parse('2026-11-17T10:10:00.000Z')
+      const wtPath = path.join(tmpRoot, 'repo')
+      const claudeProjDir = path.join(tmpRoot, '.claude', 'projects', 'repo-slug')
+      const oldParentId = 'parent-claude-old'
+      const subDirWithParent = path.join(claudeProjDir, oldParentId, 'subagents')
+      const subDirOrphan = path.join(claudeProjDir, 'missing-parent-id', 'subagents')
+      fs.mkdirSync(wtPath, { recursive: true })
+      fs.mkdirSync(subDirWithParent, { recursive: true })
+      fs.mkdirSync(subDirOrphan, { recursive: true })
+
+      // Old parent (>6h old so pollSingleLiveAgent excludes it from hotRaw) that spawned two subagents via Task/Agent
+      const oldParentTs = new Date(now - 8 * 3600_000).toISOString()
+      const parentFile = path.join(claudeProjDir, `${oldParentId}.jsonl`)
+      fs.writeFileSync(
+        parentFile,
+        [
+          JSON.stringify({
+            type: 'user',
+            sessionId: oldParentId,
+            cwd: wtPath,
+            timestamp: oldParentTs,
+            message: { role: 'user', content: 'Audit codebase architecture' }
+          }),
+          JSON.stringify({
+            type: 'assistant',
+            uuid: 'asst-spawn-1',
+            sessionId: oldParentId,
+            cwd: wtPath,
+            timestamp: new Date(now - 8 * 3600_000 + 2_000).toISOString(),
+            message: {
+              id: 'msg-spawn-1',
+              model: 'claude-sonnet-4-6',
+              content: [
+                {
+                  type: 'tool_use',
+                  id: 'toolu_task_1',
+                  name: 'Task',
+                  input: {
+                    subagent_type: 'Explore',
+                    description: 'Audit aggregator wiring'
+                  }
+                },
+                {
+                  type: 'tool_use',
+                  id: 'toolu_agent_2',
+                  name: 'Agent',
+                  input: {
+                    subagent_type: 'Explore',
+                    description: 'Explore parser edge cases'
+                  }
+                }
+              ],
+              usage: { input_tokens: 1000, output_tokens: 150 }
+            }
+          }),
+          JSON.stringify({
+            type: 'user',
+            sessionId: oldParentId,
+            cwd: wtPath,
+            timestamp: new Date(now - 8 * 3600_000 + 4_000).toISOString(),
+            toolUseResult: { agentId: 'a101' },
+            message: {
+              role: 'user',
+              content: [{ type: 'tool_result', tool_use_id: 'toolu_task_1', content: 'done' }]
+            }
+          }),
+          JSON.stringify({
+            type: 'user',
+            sessionId: oldParentId,
+            cwd: wtPath,
+            timestamp: new Date(now - 8 * 3600_000 + 5_000).toISOString(),
+            toolUseResult: { agentId: 'a202' },
+            message: {
+              role: 'user',
+              content: [{ type: 'tool_result', tool_use_id: 'toolu_agent_2', content: 'done' }]
+            }
+          })
+        ].join('\n') + '\n',
+        'utf8'
+      )
+      const oldMtimeSec = (now - 8 * 3600_000 + 5_000) / 1000
+      fs.utimesSync(parentFile, oldMtimeSec, oldMtimeSec)
+
+      // Child 1 (`agent-a101.jsonl` + `.meta.json`): linked to parent Task -> `Explore: Audit aggregator wiring`
+      const child1File = path.join(subDirWithParent, 'agent-a101.jsonl')
+      fs.writeFileSync(
+        child1File,
+        [
+          JSON.stringify({
+            type: 'user',
+            isSidechain: true,
+            agentId: 'a101',
+            sessionId: oldParentId,
+            cwd: wtPath,
+            timestamp: new Date(now - 8_000).toISOString(),
+            message: { role: 'user', content: 'Check src/aggregator.ts carefully' }
+          }),
+          JSON.stringify({
+            type: 'assistant',
+            isSidechain: true,
+            agentId: 'a101',
+            sessionId: oldParentId,
+            cwd: wtPath,
+            timestamp: new Date(now - 4_000).toISOString(),
+            message: {
+              id: 'msg-a101',
+              model: 'claude-sonnet-4-6',
+              usage: { input_tokens: 500, output_tokens: 100 }
+            }
+          })
+        ].join('\n') + '\n',
+        'utf8'
+      )
+      fs.writeFileSync(
+        path.join(subDirWithParent, 'agent-a101.meta.json'),
+        JSON.stringify({ agentType: 'Explore' }),
+        'utf8'
+      )
+
+      // Child 2 (`agent-a202.jsonl`): description already starts with role -> `Explore parser edge cases` (no double prefix)
+      const child2File = path.join(subDirWithParent, 'agent-a202.jsonl')
+      fs.writeFileSync(
+        child2File,
+        [
+          JSON.stringify({
+            type: 'user',
+            isSidechain: true,
+            agentId: 'a202',
+            sessionId: oldParentId,
+            cwd: wtPath,
+            timestamp: new Date(now - 7_000).toISOString(),
+            message: { role: 'user', content: 'Inspect parsers.ts' }
+          }),
+          JSON.stringify({
+            type: 'assistant',
+            isSidechain: true,
+            agentId: 'a202',
+            sessionId: oldParentId,
+            cwd: wtPath,
+            timestamp: new Date(now - 3_000).toISOString(),
+            message: {
+              id: 'msg-a202',
+              model: 'claude-sonnet-4-6',
+              usage: { input_tokens: 400, output_tokens: 80 }
+            }
+          })
+        ].join('\n') + '\n',
+        'utf8'
+      )
+
+      // Child 3 (`agent-orphan99.jsonl` + `.meta.json`): parent transcript absent -> falls back to `.meta.json` `agentType` (`Plan`)
+      const orphanFile = path.join(subDirOrphan, 'agent-orphan99.jsonl')
+      fs.writeFileSync(
+        orphanFile,
+        [
+          JSON.stringify({
+            type: 'user',
+            isSidechain: true,
+            agentId: 'orphan99',
+            sessionId: 'missing-parent-id',
+            cwd: wtPath,
+            timestamp: new Date(now - 6_000).toISOString(),
+            message: { role: 'user', content: 'Boilerplate prompt that should lose to meta agentType' }
+          }),
+          JSON.stringify({
+            type: 'assistant',
+            isSidechain: true,
+            agentId: 'orphan99',
+            sessionId: 'missing-parent-id',
+            cwd: wtPath,
+            timestamp: new Date(now - 2_000).toISOString(),
+            message: {
+              id: 'msg-orphan99',
+              model: 'claude-sonnet-4-6',
+              usage: { input_tokens: 300, output_tokens: 60 }
+            }
+          })
+        ].join('\n') + '\n',
+        'utf8'
+      )
+      fs.writeFileSync(
+        path.join(subDirOrphan, 'agent-orphan99.meta.json'),
+        JSON.stringify({ agentType: 'Plan' }),
+        'utf8'
+      )
+
+      const scanner = new TranscriptScanner({ homeDir: tmpRoot, orcaAppDirs: [] })
+      const sessions = scanner.scan({ forceFullDiscovery: true, now })
+      const journal = scanner.getJournalIndex()
+      const pricing = new PricingEngine()
+      const runtime = {
+        focusedName: 'main',
+        focusedBranch: 'main',
+        focusedPath: wtPath,
+        liveAgents: []
+      }
+
+      const snap = buildDashboardSnapshot(sessions, journal, pricing, runtime, now)
+      assert.equal(
+        snap.sessions.find((s) => s.sessionId === oldParentId)?.title,
+        'Audit codebase architecture'
+      )
+
+      const c1 = snap.live.subagents.find((c) => c.sessionKey === 'claude:agent-a101')
+      const c2 = snap.live.subagents.find((c) => c.sessionKey === 'claude:agent-a202')
+      const c3 = snap.live.subagents.find((c) => c.sessionKey === 'claude:agent-orphan99')
+      assert.equal(c1?.title, 'Explore: Audit aggregator wiring')
+      assert.equal(c2?.title, 'Explore parser edge cases')
+      assert.equal(c3?.title, 'Plan')
+
+      // pollSingleLiveAgent must still resolve child's parent spawn description even when parent's updatedAtMs < recentCutoff
+      const polledChild1 = pollSingleLiveAgent('claude:agent-a101', sessions, journal, pricing, runtime, now)
+      assert.equal(polledChild1?.title, 'Explore: Audit aggregator wiring')
+
+      // Fallback lookup by agentId when child has parentSessionId === null
+      const noParentChild = createEmptySessionState('agent-a101', 'claude', '/tmp/agent-a101-noparent.jsonl')
+      noParentChild.cwd = wtPath
+      noParentChild.isSubagent = true
+      noParentChild.parentSessionId = null
+      noParentChild.subagentId = 'a101'
+      noParentChild.updatedAtMs = now - 1_000
+      noParentChild.turnsByKey.set('t-np', {
+        turnKey: 't-np',
+        timestampMs: now - 1_000,
+        input: 100,
+        output: 20,
+        reasoning: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 120,
+        durationSec: 1,
+        tps: 20,
+        model: 'claude-sonnet-4-6',
+        explicitCostUsd: null
+      })
+      const parentOnly = sessions.find((s) => s.sessionId === oldParentId)!
+      const snapNoParent = buildDashboardSnapshot([parentOnly, noParentChild], journal, pricing, runtime, now)
+      assert.equal(
+        snapNoParent.live.subagents.find((c) => c.sessionKey === 'claude:agent-a101')?.title,
+        'Explore: Audit aggregator wiring'
+      )
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('scanner bounds oversized .meta.json, refreshes stale cache on .meta.json update/delete, and rejects raw UUID subagent labels', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-subagent-meta-edge-'))
+    try {
+      const now = Date.now()
+      const yesterdayMs = now - 2 * 86_400_000
+      const wtPath = path.join(tmpRoot, 'repo')
+      const subDir = path.join(tmpRoot, '.claude', 'projects', 'repo-slug', 'parent-hist', 'subagents')
+      fs.mkdirSync(wtPath, { recursive: true })
+      fs.mkdirSync(subDir, { recursive: true })
+
+      // 1. Oversized .meta.json (> 64 KiB) must be skipped safely
+      const oversizedJsonl = path.join(subDir, 'agent-oversized.jsonl')
+      fs.writeFileSync(
+        oversizedJsonl,
+        `${JSON.stringify({
+          type: 'assistant',
+          isSidechain: true,
+          agentId: 'oversized',
+          sessionId: 'parent-hist',
+          cwd: wtPath,
+          timestamp: new Date(now - 5_000).toISOString(),
+          message: { id: 'm-ov', model: 'claude-sonnet-4-6', usage: { input_tokens: 100, output_tokens: 20 } }
+        })}\n`,
+        'utf8'
+      )
+      fs.writeFileSync(
+        path.join(subDir, 'agent-oversized.meta.json'),
+        JSON.stringify({ agentType: 'Explore', pad: 'x'.repeat(65 * 1024) }),
+        'utf8'
+      )
+
+      // 2. Raw UUIDs in .meta.json must be rejected
+      const uuidMetaJsonl = path.join(subDir, 'agent-uuidmeta.jsonl')
+      fs.writeFileSync(
+        uuidMetaJsonl,
+        `${JSON.stringify({
+          type: 'assistant',
+          isSidechain: true,
+          agentId: 'uuidmeta',
+          sessionId: 'parent-hist',
+          cwd: wtPath,
+          timestamp: new Date(now - 4_000).toISOString(),
+          message: { id: 'm-um', model: 'claude-sonnet-4-6', usage: { input_tokens: 100, output_tokens: 20 } }
+        })}\n`,
+        'utf8'
+      )
+      fs.writeFileSync(
+        path.join(subDir, 'agent-uuidmeta.meta.json'),
+        JSON.stringify({
+          agentType: '12345678-1234-1234-1234-123456789abc',
+          name: 'abcdef1234567890abcdef1234567890'
+        }),
+        'utf8'
+      )
+
+      // 3. Pre-today subagent whose .meta.json changes & is later deleted while .jsonl stays unchanged
+      const histJsonl = path.join(subDir, 'agent-hist1.jsonl')
+      const histMeta = path.join(subDir, 'agent-hist1.meta.json')
+      fs.writeFileSync(
+        histJsonl,
+        `${JSON.stringify({
+          type: 'assistant',
+          isSidechain: true,
+          agentId: 'hist1',
+          sessionId: 'parent-hist',
+          cwd: wtPath,
+          timestamp: new Date(yesterdayMs).toISOString(),
+          message: { id: 'm-h1', model: 'claude-sonnet-4-6', usage: { input_tokens: 200, output_tokens: 40 } }
+        })}\n`,
+        'utf8'
+      )
+      const yesterdaySec = yesterdayMs / 1000
+      fs.utimesSync(histJsonl, yesterdaySec, yesterdaySec)
+      fs.writeFileSync(histMeta, JSON.stringify({ agentType: 'Explore' }), 'utf8')
+      fs.utimesSync(histMeta, yesterdaySec, yesterdaySec)
+
+      // 4. Hot subagent to verify pollHotFiles picks up .meta.json update + deletion when .jsonl is unchanged
+      const hotJsonl = path.join(subDir, 'agent-hot1.jsonl')
+      const hotMeta = path.join(subDir, 'agent-hot1.meta.json')
+      fs.writeFileSync(
+        hotJsonl,
+        `${JSON.stringify({
+          type: 'assistant',
+          isSidechain: true,
+          agentId: 'hot1',
+          sessionId: 'parent-hist',
+          cwd: wtPath,
+          timestamp: new Date(now - 10_000).toISOString(),
+          message: { id: 'm-hot1', model: 'claude-sonnet-4-6', usage: { input_tokens: 150, output_tokens: 30 } }
+        })}\n`,
+        'utf8'
+      )
+      fs.writeFileSync(hotMeta, JSON.stringify({ agentType: 'Explore' }), 'utf8')
+
+      const scanner = new TranscriptScanner({ homeDir: tmpRoot, orcaAppDirs: [] })
+      let sessions = scanner.scan({ forceFullDiscovery: true, now })
+
+      const ov1 = sessions.find((s) => s.sessionId === 'agent-oversized')
+      assert.equal(ov1?.subagentRole, null)
+      assert.equal(ov1?.subagentName, null)
+
+      const um1 = sessions.find((s) => s.sessionId === 'agent-uuidmeta')
+      assert.equal(um1?.subagentRole, null)
+      assert.equal(um1?.subagentName, null)
+
+      const h1 = sessions.find((s) => s.sessionId === 'agent-hist1')
+      assert.equal(h1?.subagentRole, 'Explore')
+      assert.equal(h1?.subagentName, null)
+
+      const cacheSnap1 = scanner.consumeHistoricalCacheSnapshot(now)
+      assert.ok(cacheSnap1, 'Expected initial historical cache snapshot for pre-today session')
+      assert.equal(scanner.hasDirtyHistoricalCache(), false)
+
+      // Edit pre-today .meta.json without touching .jsonl
+      fs.writeFileSync(histMeta, JSON.stringify({ agentType: 'Plan', name: 'Arch' }), 'utf8')
+      fs.utimesSync(histMeta, (now - 1_000) / 1000, (now - 1_000) / 1000)
+
+      // Hydrate a fresh scanner from cacheSnap1 and scan with unchanged .jsonl
+      const hydratedScanner = new TranscriptScanner({ homeDir: tmpRoot, orcaAppDirs: [] })
+      hydratedScanner.hydrateHistoricalCache(cacheSnap1)
+      const hydratedSessions = hydratedScanner.scan({ forceFullDiscovery: true, now })
+      const h2 = hydratedSessions.find((s) => s.sessionId === 'agent-hist1')
+      assert.equal(h2?.subagentRole, 'Plan')
+      assert.equal(h2?.subagentName, 'Arch')
+      assert.equal(
+        hydratedScanner.hasDirtyHistoricalCache(),
+        true,
+        'Updating pre-today .meta.json must mark historical cache dirty'
+      )
+
+      // Also verify pollHotFiles picks up .meta.json update and deletion while hot .jsonl is unchanged
+      fs.writeFileSync(hotMeta, JSON.stringify({ agentType: 'CodeReviewer', name: 'Ada' }), 'utf8')
+      fs.utimesSync(hotMeta, (now - 500) / 1000, (now - 500) / 1000)
+      sessions = scanner.pollHotFiles(now, 'claude:agent-hot1')
+      const hotUpdated = sessions.find((s) => s.sessionId === 'agent-hot1')
+      assert.equal(hotUpdated?.subagentRole, 'CodeReviewer')
+      assert.equal(hotUpdated?.subagentName, 'Ada')
+
+      fs.rmSync(hotMeta)
+      sessions = scanner.pollHotFiles(now, 'claude:agent-hot1')
+      const hotDeleted = sessions.find((s) => s.sessionId === 'agent-hot1')
+      assert.equal(hotDeleted?.subagentRole, null)
+      assert.equal(hotDeleted?.subagentName, null)
+
+      // Delete pre-today .meta.json and verify hydratedScanner clears stale fields and marks cache dirty
+      hydratedScanner.consumeHistoricalCacheSnapshot(now)
+      assert.equal(hydratedScanner.hasDirtyHistoricalCache(), false)
+      fs.rmSync(histMeta)
+      const afterDelete = hydratedScanner.scan({ forceFullDiscovery: true, now })
+      const h3 = afterDelete.find((s) => s.sessionId === 'agent-hist1')
+      assert.equal(h3?.subagentRole, null)
+      assert.equal(h3?.subagentName, null)
+      assert.equal(
+        hydratedScanner.hasDirtyHistoricalCache(),
+        true,
+        'Deleting pre-today .meta.json must clear stale fields and mark historical cache dirty'
+      )
+
+      // 5. Raw UUIDs in Codex subagent metadata and Claude Task calls must never leak into titles
+      const codexUuidSub = createEmptySessionState('codex-uuid-sub', 'codex', '/tmp/codex-uuid.jsonl')
+      applyCodexLines(codexUuidSub, [
+        JSON.stringify({
+          timestamp: new Date(now - 3_000).toISOString(),
+          type: 'session_meta',
+          payload: {
+            id: 'codex-uuid-sub-id',
+            cwd: wtPath,
+            source: {
+              subagent: {
+                thread_spawn: {
+                  parent_thread_id: 'parent-codex',
+                  agent_path: '/root/12345678-1234-1234-1234-123456789abc',
+                  agent_role: 'default',
+                  agent_nickname: '12345678-1234-1234-1234-123456789abc'
+                }
+              }
+            }
+          }
+        }),
+        JSON.stringify({
+          timestamp: new Date(now - 2_000).toISOString(),
+          type: 'event_msg',
+          payload: {
+            type: 'token_count',
+            info: {
+              total_token_usage: { total_tokens: 100 },
+              last_token_usage: { input_tokens: 80, cached_input_tokens: 0, output_tokens: 20 }
+            }
+          }
+        })
+      ])
+      assert.equal(codexUuidSub.subagentRole, null)
+      assert.equal(codexUuidSub.subagentName, null)
+
+      const snapUuid = buildDashboardSnapshot(
+        [codexUuidSub],
+        createTestJournalIndex(),
+        new PricingEngine(),
+        { focusedName: 'main', focusedBranch: 'main', focusedPath: wtPath, liveAgents: [] },
+        now
+      )
+      const uuidSubCard = snapUuid.live.subagents.find(
+        (c) => c.sessionKey === 'codex:codex-uuid-sub-id'
+      )
+      assert.equal(uuidSubCard?.title, 'OpenAI · codex-uu')
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+  })
+})

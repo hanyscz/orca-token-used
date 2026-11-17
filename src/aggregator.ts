@@ -8,7 +8,7 @@ import {
   type JournalIndex,
   type TerminalTabMeta
 } from './journal'
-import type { ParsedTurnUsage, SessionTranscriptState } from './parsers'
+import type { ParsedTurnUsage, SessionTranscriptState, SpawnedSubagentMeta } from './parsers'
 import { type PricingEngine, providerLabelForAgent } from './pricing'
 import type {
   AgentKind,
@@ -459,13 +459,120 @@ function matchTerminalTabsToCliSessions(
   return tabBySessionKey
 }
 
+interface SpawnedSubagentIndex {
+  byParentAndAgentId: Map<string, Map<string, SpawnedSubagentMeta>>
+  fallbackByAgentId: Map<string, { updatedAtMs: number; meta: SpawnedSubagentMeta }>
+}
+
+/**
+ * Indexes parent `Task`/`Agent` subagent spawn metadata by `(agent:parentSessionId, agentId)`
+ * and maintains an `agent:agentId` fallback map for child transcripts missing `parentSessionId`.
+ */
+function indexSpawnedSubagents(sessions: Iterable<SessionTranscriptState>): SpawnedSubagentIndex {
+  const byParentAndAgentId = new Map<string, Map<string, SpawnedSubagentMeta>>()
+  const fallbackByAgentId = new Map<string, { updatedAtMs: number; meta: SpawnedSubagentMeta }>()
+
+  for (const st of sessions) {
+    if (st.isInternalHelper || !st.spawnedSubagentsByAgentId) continue
+    const entries = Object.entries(st.spawnedSubagentsByAgentId)
+    if (entries.length === 0) continue
+
+    const pKey = `${st.agent}:${st.sessionId}`
+    let byAgentId = byParentAndAgentId.get(pKey)
+    if (!byAgentId) {
+      byAgentId = new Map<string, SpawnedSubagentMeta>()
+      byParentAndAgentId.set(pKey, byAgentId)
+    }
+
+    for (const [rawAgentId, meta] of entries) {
+      const agentId = rawAgentId.trim()
+      if (!agentId || !meta) continue
+      const prev = byAgentId.get(agentId)
+      const merged: SpawnedSubagentMeta = prev
+        ? {
+            name: meta.name ?? prev.name,
+            role: meta.role ?? prev.role,
+            description: meta.description ?? prev.description
+          }
+        : meta
+      byAgentId.set(agentId, merged)
+
+      const fallbackKey = `${st.agent}:${agentId}`
+      const existingFallback = fallbackByAgentId.get(fallbackKey)
+      if (!existingFallback || st.updatedAtMs >= existingFallback.updatedAtMs) {
+        fallbackByAgentId.set(fallbackKey, { updatedAtMs: st.updatedAtMs, meta: merged })
+      }
+    }
+  }
+
+  return { byParentAndAgentId, fallbackByAgentId }
+}
+
+function lookupSpawnedSubagentMeta(
+  st: SessionTranscriptState,
+  index: SpawnedSubagentIndex
+): SpawnedSubagentMeta | undefined {
+  const rawSubagentId = st.subagentId?.trim() || null
+  const strippedSessionId = st.sessionId.startsWith('agent-')
+    ? st.sessionId.slice('agent-'.length).trim()
+    : null
+  const candidates = [rawSubagentId, strippedSessionId, st.sessionId.trim()].filter(
+    (v, idx, arr): v is string => Boolean(v) && arr.indexOf(v) === idx
+  )
+  if (candidates.length === 0) return undefined
+
+  const pKey = parentSessionKey(st.agent, st.parentSessionId)
+  if (pKey) {
+    const byAgentId = index.byParentAndAgentId.get(pKey)
+    if (!byAgentId) return undefined
+    for (const agentId of candidates) {
+      const hit = byAgentId.get(agentId)
+      if (hit) return hit
+    }
+    return undefined
+  }
+
+  for (const agentId of candidates) {
+    const hit = index.fallbackByAgentId.get(`${st.agent}:${agentId}`)
+    if (hit) return hit.meta
+  }
+  return undefined
+}
+
+function formatSpawnedSubagentTitle(meta: SpawnedSubagentMeta | undefined): string | null {
+  if (!meta) return null
+  const description = meta.description?.trim() || null
+  const rawRole = meta.role?.trim() || null
+  const role = rawRole && rawRole.toLowerCase() !== 'default' ? rawRole : null
+  const name = meta.name?.trim() || null
+
+  if (description) {
+    return role && !description.toLowerCase().startsWith(role.toLowerCase())
+      ? `${role}: ${description}`
+      : description
+  }
+  return name || role || null
+}
+
+function formatLocalSubagentTitle(st: SessionTranscriptState): string | null {
+  const rawRole = st.subagentRole?.trim() || null
+  const role = rawRole && rawRole.toLowerCase() !== 'default' ? rawRole : null
+  const name = st.subagentName?.trim() || null
+  if (role && name && role.toLowerCase() !== name.toLowerCase()) {
+    return `${role} · ${name}`
+  }
+  return role || name || null
+}
+
 function enrichSessions(
   sessions: SessionTranscriptState[],
   journal: JournalIndex,
   pricing: PricingEngine,
-  indexedWorkspaces: IndexedWorkspace[]
+  indexedWorkspaces: IndexedWorkspace[],
+  parentContextSessions: Iterable<SessionTranscriptState> = sessions
 ): EnrichedSession[] {
   const homeNorm = normalizeFsPath(os.homedir())
+  const spawnedSubagentIndex = indexSpawnedSubagents(parentContextSessions)
 
   // Deduplicate by `${agent}:${sessionId}` so archived or multi-home copies never double-count
   const dedupedStates = new Map<string, SessionTranscriptState>()
@@ -508,26 +615,34 @@ function enrichSessions(
 
     if (summary.tokens.total <= 0 && !jMeta) continue
 
+    const agSummary =
+      st.agent === 'antigravity' ? journal.antigravitySummaries?.get(st.sessionId) : undefined
+    const agSummaryTitle = agSummary?.title ?? null
+    const agSubagentName = agSummary?.agentName?.trim() || null
+
     const isUnlinkedAcpSubagent =
       st.agent === 'antigravity' &&
       st.filePath.includes('antigravity-acp') &&
       hasJournalRecords &&
       !jMeta
-    const isSubagent = Boolean(st.isSubagent || isUnlinkedAcpSubagent)
+    const isSubagent = Boolean(st.isSubagent || isUnlinkedAcpSubagent || agSummary?.isSubagent)
 
     const sKey = `${st.agent}:${st.sessionId}`
     const matchedTab = tabBySessionKey.get(sKey)
-    const agSummaryTitle =
-      st.agent === 'antigravity'
-        ? journal.antigravitySummaries?.get(st.sessionId)?.title ?? null
-        : null
-    const title =
-      matchedTab?.effectiveTitle ||
-      st.cliCustomTitle ||
-      jMeta?.title ||
-      agSummaryTitle ||
-      st.titleHint ||
-      `${providerLabelForAgent(st.agent, summary.topModel)} · ${st.sessionId.slice(0, 8)}`
+    const baseTitle = matchedTab?.effectiveTitle || st.cliCustomTitle || jMeta?.title || null
+    const fallbackIdTitle = `${providerLabelForAgent(st.agent, summary.topModel)} · ${st.sessionId.slice(0, 8)}`
+    const title = isSubagent
+      ? baseTitle ||
+        agSummaryTitle ||
+        agSubagentName ||
+        formatSpawnedSubagentTitle(lookupSpawnedSubagentMeta(st, spawnedSubagentIndex)) ||
+        formatLocalSubagentTitle(st) ||
+        st.titleHint ||
+        fallbackIdTitle
+      : baseTitle ||
+        agSummaryTitle ||
+        st.titleHint ||
+        fallbackIdTitle
 
     // Orca's journal stores the model currently selected for the session. Prefer it when a
     // transcript contains earlier turns from a model that was later changed in the same chat.
@@ -1767,7 +1882,7 @@ export function pollSingleLiveAgent(
       st.sessionId === sessionKey
   )
   const indexedWorkspaces = indexKnownWorkspaces(runtime.knownWorkspaces ?? [])
-  const enrichedAll = enrichSessions(hotRaw, journal, pricing, indexedWorkspaces)
+  const enrichedAll = enrichSessions(hotRaw, journal, pricing, indexedWorkspaces, rawSessions)
   const userSessions = enrichedAll.filter((s) => !s.isSubagent)
   const focusedPathNorm = normalizeFsPath(runtime.focusedPath)
   const liveCards = buildLiveAgentCards({

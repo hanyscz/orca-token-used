@@ -7,6 +7,7 @@ import {
   applyAntigravityLines,
   applyClaudeLines,
   applyCodexLines,
+  cleanSubagentLabel,
   createEmptySessionState,
   parseGeminiSessionJson,
   readCompleteJsonlChunk,
@@ -48,6 +49,8 @@ export interface CachedFileSummary {
   subagentId?: string | null
   subagentName?: string | null
   subagentRole?: string | null
+  subagentMetaMtimeMs?: number | null
+  subagentMetaSize?: number | null
   spawnedSubagentsByAgentId?: Record<string, SpawnedSubagentMeta>
   messageUuids?: string[]
   reasoningLevels?: string[]
@@ -147,15 +150,104 @@ function walkMatchingFiles(
   }
 }
 
-function applyClaudeSubagentFileHints(state: SessionTranscriptState): void {
+const MAX_SUBAGENT_META_BYTES = 64 * 1024
+
+interface SubagentMetaStamp {
+  mtimeMs: number
+  size: number
+}
+
+function readClaudeSubagentMeta(
+  metaPath: string,
+  prevStamp: SubagentMetaStamp | null | undefined
+): {
+  changedStamp: boolean
+  stamp: SubagentMetaStamp | null
+  role: string | null
+  name: string | null
+} {
+  let st: Stats
+  try {
+    st = fs.statSync(metaPath)
+  } catch {
+    return {
+      changedStamp: prevStamp !== null,
+      stamp: null,
+      role: null,
+      name: null
+    }
+  }
+  if (!st.isFile()) {
+    return {
+      changedStamp: prevStamp !== null,
+      stamp: null,
+      role: null,
+      name: null
+    }
+  }
+
+  const nextStamp: SubagentMetaStamp = { mtimeMs: st.mtimeMs, size: st.size }
+  if (
+    prevStamp &&
+    prevStamp.mtimeMs === nextStamp.mtimeMs &&
+    prevStamp.size === nextStamp.size
+  ) {
+    return {
+      changedStamp: false,
+      stamp: prevStamp,
+      role: null,
+      name: null
+    }
+  }
+
+  if (st.size <= 0 || st.size > MAX_SUBAGENT_META_BYTES) {
+    return {
+      changedStamp: true,
+      stamp: nextStamp,
+      role: null,
+      name: null
+    }
+  }
+
+  try {
+    const raw = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as unknown
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return {
+        changedStamp: true,
+        stamp: nextStamp,
+        role: null,
+        name: null
+      }
+    }
+    const obj = raw as Record<string, unknown>
+    return {
+      changedStamp: true,
+      stamp: nextStamp,
+      role: cleanSubagentLabel(obj.agentType ?? obj.subagent_type ?? obj.subagentType),
+      name: cleanSubagentLabel(obj.name ?? obj.agentName)
+    }
+  } catch {
+    return {
+      changedStamp: true,
+      stamp: nextStamp,
+      role: null,
+      name: null
+    }
+  }
+}
+
+function applyClaudeSubagentFileHints(
+  state: SessionTranscriptState,
+  subagentMetaByFile?: Map<string, SubagentMetaStamp | null>
+): boolean {
   const normalized = state.filePath.replace(/\\/g, '/')
-  if (!normalized.includes('/subagents/')) return
+  if (!normalized.includes('/subagents/')) return false
 
   state.isSubagent = true
-  if (state.agent !== 'claude') return
+  if (state.agent !== 'claude') return false
 
   const subMatch = normalized.match(/(?:^|\/)(?:([^/]+)\/)?subagents\/(agent-([^/]+))\.jsonl$/)
-  if (!subMatch) return
+  if (!subMatch) return false
 
   const parentDir = subMatch[1]
   const canonicalSessionId = subMatch[2]
@@ -171,37 +263,33 @@ function applyClaudeSubagentFileHints(state: SessionTranscriptState): void {
     state.parentSessionId = parentDir
   }
 
-  if (state.subagentRole && state.subagentName) return
-
   const metaPath = state.filePath.replace(/\.jsonl$/i, '.meta.json')
-  try {
-    const raw = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as Record<string, unknown> | null
-    if (!raw || typeof raw !== 'object') return
-    const rawRole = raw.agentType ?? raw.subagent_type ?? raw.subagentType
-    if (!state.subagentRole && typeof rawRole === 'string' && rawRole.trim()) {
-      state.subagentRole = rawRole.trim()
-    }
-    const rawName = raw.name ?? raw.agentName
-    if (!state.subagentName && typeof rawName === 'string' && rawName.trim()) {
-      state.subagentName = rawName.trim()
-    }
-  } catch {
-    // Sibling .meta.json is optional
-  }
+  const prevStamp = subagentMetaByFile?.get(state.filePath)
+  const meta = readClaudeSubagentMeta(metaPath, prevStamp)
+  if (!meta.changedStamp) return false
+
+  subagentMetaByFile?.set(state.filePath, meta.stamp)
+  const prevRole = state.subagentRole
+  const prevName = state.subagentName
+  state.subagentRole = meta.role
+  state.subagentName = meta.name
+  return prevRole !== state.subagentRole || prevName !== state.subagentName
 }
 
 function ingestJsonlTranscript(
   statesByFile: Map<string, SessionTranscriptState>,
   disc: DiscoveredFile,
-  existing: SessionTranscriptState | undefined
+  existing: SessionTranscriptState | undefined,
+  subagentMetaByFile?: Map<string, SubagentMetaStamp | null>
 ): { state: SessionTranscriptState; chunkMtimeMs: number } | null {
   let state = existing
   if (!state || disc.sizeBytes < state.offsetBytes) {
     state = createEmptySessionState(disc.sessionIdHint, disc.agent, disc.filePath)
-    applyClaudeSubagentFileHints(state)
+    subagentMetaByFile?.delete(disc.filePath)
+    applyClaudeSubagentFileHints(state, subagentMetaByFile)
     statesByFile.set(disc.filePath, state)
-  } else if (state.agent === 'claude' && state.isSubagent && !state.subagentRole) {
-    applyClaudeSubagentFileHints(state)
+  } else if (state.agent === 'claude' && state.isSubagent) {
+    applyClaudeSubagentFileHints(state, subagentMetaByFile)
   }
 
   try {
@@ -310,6 +398,7 @@ export class TranscriptScanner {
   private readonly lookbackDays: number
 
   private statesByFile = new Map<string, SessionTranscriptState>()
+  private subagentMetaByFile = new Map<string, SubagentMetaStamp | null>()
   private journalIndex: JournalIndex = {
     byNativeId: new Map(),
     byOrcaSessionId: new Map(),
@@ -373,8 +462,20 @@ export class TranscriptScanner {
       st.parentSessionId = item.parentSessionId ?? null
       st.parentMessageUuid = item.parentMessageUuid ?? null
       st.subagentId = typeof item.subagentId === 'string' && item.subagentId.trim() ? item.subagentId.trim() : null
-      st.subagentName = typeof item.subagentName === 'string' && item.subagentName.trim() ? item.subagentName.trim() : null
-      st.subagentRole = typeof item.subagentRole === 'string' && item.subagentRole.trim() ? item.subagentRole.trim() : null
+      st.subagentName = cleanSubagentLabel(item.subagentName)
+      st.subagentRole = cleanSubagentLabel(item.subagentRole)
+      if (st.agent === 'claude' && st.isSubagent) {
+        if (item.subagentMetaMtimeMs === null) {
+          this.subagentMetaByFile.set(filePath, null)
+        } else if (typeof item.subagentMetaMtimeMs === 'number') {
+          this.subagentMetaByFile.set(filePath, {
+            mtimeMs: item.subagentMetaMtimeMs,
+            size: typeof item.subagentMetaSize === 'number' ? item.subagentMetaSize : -1
+          })
+        } else {
+          this.subagentMetaByFile.delete(filePath)
+        }
+      }
       if (item.spawnedSubagentsByAgentId && typeof item.spawnedSubagentsByAgentId === 'object') {
         st.spawnedSubagentsByAgentId = item.spawnedSubagentsByAgentId
       }
@@ -496,6 +597,8 @@ export class TranscriptScanner {
         serializedTurns = Array.from(hourMap.values())
       }
 
+      const metaStamp =
+        st.agent === 'claude' && st.isSubagent ? this.subagentMetaByFile.get(filePath) : undefined
       files[filePath] = {
         sessionId: st.sessionId,
         agent: st.agent,
@@ -512,6 +615,12 @@ export class TranscriptScanner {
         subagentId: st.subagentId,
         subagentName: st.subagentName,
         subagentRole: st.subagentRole,
+        ...(metaStamp !== undefined
+          ? {
+              subagentMetaMtimeMs: metaStamp ? metaStamp.mtimeMs : null,
+              subagentMetaSize: metaStamp ? metaStamp.size : null
+            }
+          : {}),
         ...(st.spawnedSubagentsByAgentId && Object.keys(st.spawnedSubagentsByAgentId).length > 0
           ? { spawnedSubagentsByAgentId: st.spawnedSubagentsByAgentId }
           : {}),
@@ -640,6 +749,23 @@ export class TranscriptScanner {
     return Array.from(this.statesByFile.values()).filter((s) => !s.isInternalHelper)
   }
 
+  private refreshUnchangedSubagentMeta(
+    existing: SessionTranscriptState,
+    discMtimeMs: number,
+    todayStartMs: number
+  ): void {
+    if (existing.agent !== 'claude' || !existing.isSubagent) return
+    const metaChanged = applyClaudeSubagentFileHints(existing, this.subagentMetaByFile)
+    if (
+      metaChanged &&
+      discMtimeMs < todayStartMs &&
+      existing.turnsByKey.size > 0 &&
+      !existing.isInternalHelper
+    ) {
+      this.dirtyHistoricalCache = true
+    }
+  }
+
   /**
    * Ultra-low-overhead (<1ms) incremental tail for 1-second single-agent live waveform polling:
    * checks files active within the last 6 hours plus the explicitly watched session without walking directories.
@@ -649,6 +775,10 @@ export class TranscriptScanner {
       return this.scan({ now })
     }
     const hotCutoff = now - 6 * 3600_000
+    const todayStart = new Date(now)
+    todayStart.setHours(0, 0, 0, 0)
+    const todayStartMs = todayStart.getTime()
+
     for (const disc of this.cachedDiscovered) {
       const existing = this.statesByFile.get(disc.filePath)
       const isTarget =
@@ -669,6 +799,7 @@ export class TranscriptScanner {
         existing.offsetBytes === disc.sizeBytes &&
         Math.abs(existing.lastMtimeMs - disc.mtimeMs) < 1
       ) {
+        this.refreshUnchangedSubagentMeta(existing, disc.mtimeMs, todayStartMs)
         continue
       }
 
@@ -688,7 +819,20 @@ export class TranscriptScanner {
         continue
       }
 
-      ingestJsonlTranscript(this.statesByFile, disc, existing)
+      const ingested = ingestJsonlTranscript(
+        this.statesByFile,
+        disc,
+        existing,
+        this.subagentMetaByFile
+      )
+      if (
+        ingested &&
+        ingested.chunkMtimeMs < todayStartMs &&
+        ingested.state.turnsByKey.size > 0 &&
+        !ingested.state.isInternalHelper
+      ) {
+        this.dirtyHistoricalCache = true
+      }
     }
     this.applyJournalSessionHints(now)
     return this.getSessions()
@@ -743,9 +887,7 @@ export class TranscriptScanner {
         existing.offsetBytes === disc.sizeBytes &&
         Math.abs(existing.lastMtimeMs - disc.mtimeMs) < 1
       ) {
-        if (existing.agent === 'claude' && existing.isSubagent && !existing.subagentRole) {
-          applyClaudeSubagentFileHints(existing)
-        }
+        this.refreshUnchangedSubagentMeta(existing, disc.mtimeMs, todayStartMs)
         continue
       }
 
@@ -766,7 +908,12 @@ export class TranscriptScanner {
         continue
       }
 
-      const ingested = ingestJsonlTranscript(this.statesByFile, disc, existing)
+      const ingested = ingestJsonlTranscript(
+        this.statesByFile,
+        disc,
+        existing,
+        this.subagentMetaByFile
+      )
       if (
         ingested &&
         ingested.chunkMtimeMs < todayStartMs &&
@@ -780,6 +927,7 @@ export class TranscriptScanner {
       for (const filePath of this.statesByFile.keys()) {
         if (!activePaths.has(filePath)) {
           this.statesByFile.delete(filePath)
+          this.subagentMetaByFile.delete(filePath)
         }
       }
     }
