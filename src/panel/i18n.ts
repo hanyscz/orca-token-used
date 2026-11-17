@@ -704,6 +704,22 @@ export function formatRelativeTime(tsMs: number, nowMs: number, msg: UiMessages)
   return msg.daysAgo(days)
 }
 
+export function formatDurationSpan(diffMs: number): string {
+  if (!Number.isFinite(diffMs) || diffMs <= 0) return ''
+  if (diffMs <= 60_000) return '<1m'
+  const totalMins = Math.floor(diffMs / 60_000)
+  const days = Math.floor(totalMins / (60 * 24))
+  const hours = Math.floor((totalMins % (60 * 24)) / 60)
+  const mins = totalMins % 60
+  if (days > 0) {
+    return hours > 0 ? `${days}d ${hours}h` : `${days}d`
+  }
+  if (hours > 0) {
+    return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`
+  }
+  return `${mins}m`
+}
+
 export function formatCountdown(
   targetMs: number | null | undefined,
   nowMs: number,
@@ -712,17 +728,5 @@ export function formatCountdown(
   if (!targetMs || !Number.isFinite(targetMs)) return ''
   const diffMs = targetMs - nowMs
   if (diffMs <= 60_000) return msg.quotaResetSoon
-  const totalMins = Math.floor(diffMs / 60_000)
-  const days = Math.floor(totalMins / (60 * 24))
-  const hours = Math.floor((totalMins % (60 * 24)) / 60)
-  const mins = totalMins % 60
-  let span = ''
-  if (days > 0) {
-    span = hours > 0 ? `${days}d ${hours}h` : `${days}d`
-  } else if (hours > 0) {
-    span = mins > 0 ? `${hours}h ${mins}m` : `${hours}h`
-  } else {
-    span = `${mins}m`
-  }
-  return msg.quotaResetsIn(span)
+  return msg.quotaResetsIn(formatDurationSpan(diffMs))
 }

@@ -40,6 +40,7 @@ import {
   parseOpenRouterPayload,
   PricingEngine
 } from './pricing'
+import type { DashboardSnapshot, LocalQuotaUsageWindow, QuotaProviderSnapshot, QuotasSnapshot } from './protocol'
 import { TranscriptScanner } from './scanner'
 import * as workerModule from './worker'
 
@@ -787,7 +788,9 @@ describe('Aggregator, Left-Sidebar Project/Worktree Focus, Pure-Icon UI & i18n',
     const navBtnMatches = [
       ...htmlSessions.matchAll(/<button[^>]*class="(tp-nav-btn[^"]*)"[^>]*>([\s\S]*?)<\/button>/g)
     ]
-    assert.equal(navBtnMatches.length, 5)
+    assert.equal(navBtnMatches.length, 6)
+    const navTabs = navBtnMatches.map((m) => m[0].match(/data-tab="([^"]+)"/)?.[1])
+    assert.deepEqual(navTabs, ['live', 'sessions', 'day', 'week', 'month', 'quotas'])
     let activeNavCount = 0
     for (const m of navBtnMatches) {
       const cls = m[1]
@@ -2968,5 +2971,575 @@ describe('Terminal Tab & Handoff Title Synchronization Regressions', () => {
       'done',
       'Authoritative journal settled timestamp newer than transcript must remain done'
     )
+  })
+})
+
+function emptyLocalWindow(overrides: Partial<LocalQuotaUsageWindow> = {}): LocalQuotaUsageWindow {
+  return {
+    totalTokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    costUsd: 0,
+    turnCount: 0,
+    sessionCount: 0,
+    rateLimitHits: null,
+    ...overrides
+  }
+}
+
+function emptyPeriodSummary() {
+  return {
+    tokens: {
+      input: 0,
+      output: 0,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
+      costUsd: 0
+    },
+    tps: { liveTps: 0, avgTps: 0, peakTps: 0 },
+    previousTotalTokens: null,
+    deltaPercent: null,
+    buckets: [],
+    byAgent: []
+  }
+}
+
+function createQuotaTestSnapshot(quotas: QuotasSnapshot | undefined, nowMs: number): DashboardSnapshot {
+  return {
+    generatedAt: nowMs,
+    workspace: {
+      id: 'repo::/Users/dev/orca-token-used',
+      project: 'orca-token-used',
+      name: 'main',
+      branch: 'main',
+      path: '/Users/dev/orca-token-used'
+    },
+    pricing: {
+      source: 'builtin',
+      syncedAt: nowMs,
+      modelCount: 10,
+      lastError: null
+    },
+    quotas,
+    live: {
+      tokens: {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0,
+        costUsd: 0
+      },
+      tps: { liveTps: 0, avgTps: 0, peakTps: 0 },
+      agents: [],
+      subagents: []
+    },
+    sessions: [],
+    periods: {
+      all: { day: emptyPeriodSummary(), week: emptyPeriodSummary(), month: emptyPeriodSummary() },
+      worktree: { day: emptyPeriodSummary(), week: emptyPeriodSummary(), month: emptyPeriodSummary() }
+    }
+  }
+}
+
+function createProviderSnapshot(
+  provider: QuotaProviderSnapshot['provider'],
+  overrides: Partial<QuotaProviderSnapshot> = {}
+): QuotaProviderSnapshot {
+  const defaultLabels = {
+    codex: 'Codex',
+    antigravity: 'Antigravity',
+    claude: 'Claude'
+  } as const
+  return {
+    provider,
+    label: defaultLabels[provider],
+    status: 'ok',
+    error: null,
+    accountEmail: null,
+    authKind: null,
+    session: null,
+    weekly: null,
+    pools: [],
+    resetCredits: null,
+    accounts: [],
+    updatedAt: null,
+    local: {
+      window5h: emptyLocalWindow(),
+      window7d: emptyLocalWindow()
+    },
+    ...overrides
+  }
+}
+
+describe('Quotas & Limits Tab UI Rendering (renderDashboardShellHtml)', () => {
+  test('renders Codex weekly-only plan with Weekly 240° gauge + 5h N/A reset-credits tile without a fake 5h gauge', () => {
+    const now = Date.UTC(2026, 10, 17, 12, 0, 0)
+    const snap = createQuotaTestSnapshot(
+      {
+        source: 'live',
+        syncedAt: now - 30_000,
+        refreshing: false,
+        lastError: null,
+        providers: [
+          createProviderSnapshot('codex', {
+            accountEmail: 'wilson@example.com',
+            authKind: 'oauth',
+            session: null,
+            weekly: {
+              usedPercent: 41,
+              windowMinutes: 10080,
+              resetsAt: now + 2 * 86_400_000,
+              resetDescription: 'Wed 3:53 PM'
+            },
+            resetCredits: {
+              availableCount: 3,
+              totalEarnedCount: 3,
+              nextExpiresAt: now + 10 * 86_400_000
+            },
+            local: {
+              window5h: emptyLocalWindow({ totalTokens: 15_000, costUsd: 0.42, turnCount: 4 }),
+              window7d: emptyLocalWindow({ totalTokens: 120_000, costUsd: 2.1, turnCount: 25 })
+            }
+          })
+        ]
+      },
+      now
+    )
+
+    const html = renderDashboardShellHtml({
+      snap,
+      tab: 'quotas',
+      scope: 'all',
+      locale: 'en',
+      nowMs: now
+    })
+
+    // Active tab is 'quotas' with localized short label
+    const activeTabMatch = html.match(/<button[^>]*class="tp-nav-btn active"[^>]*>([\s\S]*?)<\/button>/)
+    assert.ok(activeTabMatch)
+    assert.ok(activeTabMatch[0].includes('data-tab="quotas"'))
+    assert.ok(activeTabMatch[1].includes(`<span class="tp-nav-label">${getMessages('en').navShort.quotas}</span>`))
+
+    // Exactly ONE 240-degree SVG gauge for Codex (Weekly 41%), NOT a fake 5h gauge
+    const gaugeSvgs = html.match(/<svg class="tp-quota-gauge-svg"[\s\S]*?<\/svg>/g) ?? []
+    assert.equal(gaugeSvgs.length, 1)
+    assert.ok(gaugeSvgs[0].includes('M 17.09 71.00 A 38 38 0 1 1 82.91 71.00'))
+    assert.ok(gaugeSvgs[0].includes('41%'))
+    assert.ok(gaugeSvgs[0].includes('tp-quota-arc-normal'))
+
+    // 5h Window N/A tile + weekly-only hint + reset credits pill
+    assert.ok(html.includes('tp-quota-na-tile'))
+    assert.ok(html.includes('5h Window'))
+    assert.ok(html.includes('N/A'))
+    assert.ok(html.includes('Weekly-only plan · No 5h limit'))
+    assert.ok(html.includes('tp-quota-credits-pill'))
+    assert.ok(html.includes('3 reset credits'))
+    assert.ok(html.includes('Resets in 2d'))
+    assert.ok(html.includes('Wed 3:53 PM'))
+  })
+
+  test('renders Antigravity separate pool sections (Gemini Models, Claude and GPT models) with 5h + Weekly gauges and multi-account collapse group', () => {
+    const now = Date.UTC(2026, 10, 17, 12, 0, 0)
+    const snap = createQuotaTestSnapshot(
+      {
+        source: 'live',
+        syncedAt: now,
+        refreshing: false,
+        lastError: null,
+        providers: [
+          createProviderSnapshot('antigravity', {
+            accountEmail: 'victor@example.com',
+            authKind: 'consumer',
+            pools: [
+              {
+                id: 'gemini-models',
+                label: 'Gemini Models',
+                session: { usedPercent: 15, windowMinutes: 300, resetsAt: now + 3_600_000, resetDescription: null },
+                weekly: { usedPercent: 5, windowMinutes: 10080, resetsAt: now + 5 * 86_400_000, resetDescription: null }
+              },
+              {
+                id: 'claude-and-gpt-models',
+                label: 'Claude and GPT models',
+                session: { usedPercent: 80, windowMinutes: 300, resetsAt: now + 7_200_000, resetDescription: null },
+                weekly: { usedPercent: 95, windowMinutes: 10080, resetsAt: now + 6 * 86_400_000, resetDescription: null }
+              }
+            ],
+            accounts: [
+              {
+                id: 'ag-1',
+                email: 'victor@example.com',
+                label: null,
+                authKind: 'consumer',
+                active: true,
+                status: 'ok',
+                session: null,
+                weekly: null,
+                pools: [
+                  {
+                    id: 'gemini-models',
+                    label: 'Gemini Models',
+                    session: { usedPercent: 15, windowMinutes: 300, resetsAt: null, resetDescription: null },
+                    weekly: { usedPercent: 5, windowMinutes: 10080, resetsAt: null, resetDescription: null }
+                  }
+                ],
+                error: null
+              },
+              {
+                id: 'ag-2',
+                email: 'backup@example.com',
+                label: null,
+                authKind: 'consumer',
+                active: false,
+                status: 'ok',
+                session: null,
+                weekly: null,
+                pools: [
+                  {
+                    id: 'gemini-models',
+                    label: 'Gemini Models',
+                    session: { usedPercent: 42, windowMinutes: 300, resetsAt: null, resetDescription: null },
+                    weekly: { usedPercent: 20, windowMinutes: 10080, resetsAt: null, resetDescription: null }
+                  }
+                ],
+                error: null
+              }
+            ]
+          })
+        ]
+      },
+      now
+    )
+
+    const html = renderDashboardShellHtml({
+      snap,
+      tab: 'quotas',
+      scope: 'all',
+      locale: 'en',
+      collapsedGroups: { 'quotas:accounts:antigravity': false },
+      nowMs: now
+    })
+
+    const poolBlocks = html.match(/class="tp-quota-pool-block"/g) ?? []
+    assert.equal(poolBlocks.length, 2)
+    assert.ok(html.includes('Gemini Models'))
+    assert.ok(html.includes('Claude and GPT models'))
+
+    // 2 pools * 2 windows (5h + Weekly) = 4 SVG gauges
+    const gaugeSvgs = html.match(/<svg class="tp-quota-gauge-svg"[\s\S]*?<\/svg>/g) ?? []
+    assert.equal(gaugeSvgs.length, 4)
+    assert.ok(gaugeSvgs[0].includes('15%'))
+    assert.ok(gaugeSvgs[1].includes('5%'))
+    assert.ok(gaugeSvgs[2].includes('80%'))
+    assert.ok(gaugeSvgs[3].includes('95%'))
+
+    // Multi-account list renders both accounts and active badge
+    assert.ok(html.includes('data-collapse-key="quotas:accounts:antigravity"'))
+    assert.ok(html.includes('victor@example.com'))
+    assert.ok(html.includes('backup@example.com'))
+    assert.ok(html.includes('Gemini Models: 42%/20%'))
+    assert.ok(html.includes(getMessages('en').quotaActiveAccountBadge))
+  })
+
+  test('renders Claude unavailable and error states with reason banner and local rolling 5h & 7d token/cost tiles', () => {
+    const now = Date.UTC(2026, 10, 17, 12, 0, 0)
+    const snap = createQuotaTestSnapshot(
+      {
+        source: 'cache',
+        syncedAt: now - 120_000,
+        refreshing: false,
+        lastError: null,
+        providers: [
+          createProviderSnapshot('claude', {
+            status: 'unavailable',
+            error: 'No subscription plan — API key billing',
+            authKind: 'api-key',
+            local: {
+              window5h: emptyLocalWindow({
+                totalTokens: 45_200,
+                costUsd: 1.25,
+                turnCount: 12,
+                sessionCount: 2,
+                rateLimitHits: 2
+              }),
+              window7d: emptyLocalWindow({
+                totalTokens: 320_000,
+                costUsd: 8.5,
+                turnCount: 64,
+                sessionCount: 9,
+                rateLimitHits: 0
+              })
+            }
+          }),
+          createProviderSnapshot('codex', {
+            status: 'error',
+            error: 'orca account list exited with code 1'
+          })
+        ]
+      },
+      now
+    )
+
+    const html = renderDashboardShellHtml({
+      snap,
+      tab: 'quotas',
+      scope: 'all',
+      locale: 'en',
+      nowMs: now
+    })
+
+    // No fake gauges when unavailable/error
+    assert.equal((html.match(/<svg class="tp-quota-gauge-svg"/g) ?? []).length, 0)
+
+    // Unavailable reason banner (non-error style) + local 5h & 7d tiles
+    assert.ok(html.includes('<div class="tp-quota-reason-banner">No subscription plan — API key billing</div>'))
+    assert.ok(html.includes('tp-quota-local-grid'))
+    assert.ok(html.includes('Local 5h'))
+    assert.ok(html.includes('45.2K tok'))
+    assert.ok(html.includes('$1.25'))
+    assert.ok(html.includes('12 turns'))
+    assert.ok(html.includes('2 × 429'))
+    assert.ok(html.includes('Local 7d'))
+    assert.ok(html.includes('320.0K tok'))
+    assert.ok(html.includes('$8.50'))
+    assert.ok(html.includes('64 turns'))
+
+    // Error state renders error status pill + error reason banner
+    assert.ok(html.includes('tp-quota-status-error'))
+    assert.ok(html.includes('<div class="tp-quota-reason-banner tp-quota-reason-error">orca account list exited with code 1</div>'))
+  })
+
+  test('applies severity color classes at >=75% warn and >=90% crit and clamps edge values (0%, 100%, -25%, 150%, NaN, Infinity)', () => {
+    const now = Date.UTC(2026, 10, 17, 12, 0, 0)
+    const makeWindow = (usedPercent: number) => ({
+      usedPercent,
+      windowMinutes: 300,
+      resetsAt: now + 3_600_000,
+      resetDescription: null
+    })
+    const snap = createQuotaTestSnapshot(
+      {
+        source: 'live',
+        syncedAt: now,
+        refreshing: false,
+        lastError: null,
+        providers: [
+          createProviderSnapshot('antigravity', {
+            pools: [
+              { id: 'p-norm', label: 'Below Warn', session: makeWindow(74.9), weekly: makeWindow(0) },
+              { id: 'p-warn', label: 'Warn Range', session: makeWindow(75), weekly: makeWindow(89.9) },
+              { id: 'p-crit', label: 'Crit Range', session: makeWindow(90), weekly: makeWindow(100) },
+              { id: 'p-clamp', label: 'Out Of Range', session: makeWindow(-25), weekly: makeWindow(150) },
+              { id: 'p-nan', label: 'Non Finite', session: makeWindow(Number.NaN), weekly: makeWindow(Number.POSITIVE_INFINITY) }
+            ]
+          })
+        ]
+      },
+      now
+    )
+
+    const html = renderDashboardShellHtml({
+      snap,
+      tab: 'quotas',
+      scope: 'all',
+      locale: 'en',
+      nowMs: now
+    })
+
+    assert.ok(!html.includes('NaN'))
+    assert.ok(!html.includes('Infinity'))
+
+    const gaugeSvgs = html.match(/<svg class="tp-quota-gauge-svg"[\s\S]*?<\/svg>/g) ?? []
+    assert.equal(gaugeSvgs.length, 10)
+
+    // 74.9% -> normal
+    assert.ok(gaugeSvgs[0].includes('tp-quota-arc-normal'))
+    assert.ok(gaugeSvgs[0].includes('tp-quota-pct-normal'))
+    assert.ok(gaugeSvgs[0].includes('75%')) // rounded display while severity stays normal (< 75)
+
+    // 0% -> normal, no fill path
+    assert.ok(gaugeSvgs[1].includes('0%'))
+    assert.ok(gaugeSvgs[1].includes('tp-quota-pct-normal'))
+    assert.ok(!gaugeSvgs[1].includes('tp-quota-arc-fill'))
+
+    // 75% and 89.9% -> warn
+    assert.ok(gaugeSvgs[2].includes('tp-quota-arc-warn'))
+    assert.ok(gaugeSvgs[2].includes('tp-quota-pct-warn'))
+    assert.ok(gaugeSvgs[3].includes('tp-quota-arc-warn'))
+    assert.ok(gaugeSvgs[3].includes('tp-quota-pct-warn'))
+
+    // 90% and 100% -> crit
+    assert.ok(gaugeSvgs[4].includes('tp-quota-arc-crit'))
+    assert.ok(gaugeSvgs[4].includes('tp-quota-pct-crit'))
+    assert.ok(gaugeSvgs[5].includes('100%'))
+    assert.ok(gaugeSvgs[5].includes('tp-quota-arc-crit'))
+    assert.ok(gaugeSvgs[5].includes('stroke-dashoffset="0.00"'))
+
+    // -25% -> clamped to 0%, no fill path
+    assert.ok(gaugeSvgs[6].includes('0%'))
+    assert.ok(gaugeSvgs[6].includes('tp-quota-pct-normal'))
+    assert.ok(!gaugeSvgs[6].includes('tp-quota-arc-fill'))
+
+    // 150% -> clamped to 100%, crit, dashoffset 0.00
+    assert.ok(gaugeSvgs[7].includes('100%'))
+    assert.ok(gaugeSvgs[7].includes('tp-quota-arc-crit'))
+    assert.ok(gaugeSvgs[7].includes('stroke-dashoffset="0.00"'))
+
+    // NaN and Infinity -> clamped safely to 0% normal, no fill path
+    assert.ok(gaugeSvgs[8].includes('0%'))
+    assert.ok(gaugeSvgs[8].includes('tp-quota-pct-normal'))
+    assert.ok(!gaugeSvgs[8].includes('tp-quota-arc-fill'))
+    assert.ok(gaugeSvgs[9].includes('0%'))
+    assert.ok(gaugeSvgs[9].includes('tp-quota-pct-normal'))
+    assert.ok(!gaugeSvgs[9].includes('tp-quota-arc-fill'))
+  })
+
+  test('escapes XSS payloads in accountEmail, error, pool.label, and resetDescription', () => {
+    const now = Date.UTC(2026, 10, 17, 12, 0, 0)
+    const xssEmail = 'evil@x.com"><script>alert("email")</script>'
+    const xssError = '<img src=x onerror="alert(1)"><script>alert("err")</script>'
+    const xssPool = 'Pool <script>alert("pool")</script> "attr"'
+    const xssReset = 'Fri 10:00 AM" onmouseover="alert(2)<script>alert("reset")</script>'
+
+    const snap = createQuotaTestSnapshot(
+      {
+        source: 'error',
+        syncedAt: now,
+        refreshing: false,
+        lastError: xssError,
+        providers: [
+          createProviderSnapshot('antigravity', {
+            accountEmail: xssEmail,
+            pools: [
+              {
+                id: 'xss-pool',
+                label: xssPool,
+                session: { usedPercent: 20, windowMinutes: 300, resetsAt: null, resetDescription: xssReset },
+                weekly: null
+              }
+            ]
+          }),
+          createProviderSnapshot('claude', {
+            status: 'error',
+            accountEmail: xssEmail,
+            error: xssError
+          })
+        ]
+      },
+      now
+    )
+
+    const html = renderDashboardShellHtml({
+      snap,
+      tab: 'quotas',
+      scope: 'all',
+      locale: 'en',
+      quotasError: xssError,
+      nowMs: now
+    })
+
+    assert.ok(!html.includes('<script>'))
+    assert.ok(!html.includes('<img src=x'))
+    assert.ok(!html.includes('" onmouseover="alert(2)'))
+    assert.ok(html.includes(escapeHtml(xssEmail)))
+    assert.ok(html.includes(escapeHtml(xssError)))
+    assert.ok(html.includes(escapeHtml(xssPool)))
+    assert.ok(html.includes(escapeHtml(xssReset)))
+  })
+
+  test('renders localized Quotas UI strings for en, zh-TW, and zh-CN', () => {
+    const now = Date.UTC(2026, 10, 17, 12, 0, 0)
+    const snap = createQuotaTestSnapshot(
+      {
+        source: 'live',
+        syncedAt: now,
+        refreshing: false,
+        lastError: null,
+        providers: [
+          createProviderSnapshot('codex', {
+            status: 'ok',
+            session: null,
+            weekly: { usedPercent: 25, windowMinutes: 10080, resetsAt: now + 86_400_000, resetDescription: null },
+            local: {
+              window5h: emptyLocalWindow({ totalTokens: 500, costUsd: 0.01, turnCount: 1 }),
+              window7d: emptyLocalWindow({ totalTokens: 2000, costUsd: 0.05, turnCount: 3 })
+            }
+          })
+        ]
+      },
+      now
+    )
+
+    for (const locale of ['en', 'zh-TW', 'zh-CN'] as const) {
+      const msg = getMessages(locale)
+      const html = renderDashboardShellHtml({
+        snap,
+        tab: 'quotas',
+        scope: 'all',
+        locale,
+        nowMs: now
+      })
+
+      assert.ok(html.includes(escapeHtml(msg.tabs.quotas)), `${locale}: missing tabs.quotas`)
+      assert.ok(html.includes(escapeHtml(msg.navShort.quotas)), `${locale}: missing navShort.quotas`)
+      assert.ok(html.includes(escapeHtml(msg.tabSubtitles.quotas)), `${locale}: missing tabSubtitles.quotas`)
+      assert.ok(html.includes(escapeHtml(msg.quotaSourceLive)), `${locale}: missing quotaSourceLive`)
+      assert.ok(html.includes(escapeHtml(msg.quotaRefreshAction)), `${locale}: missing quotaRefreshAction`)
+      assert.ok(html.includes(escapeHtml(msg.quota5hLabel)), `${locale}: missing quota5hLabel`)
+      assert.ok(html.includes(escapeHtml(msg.quotaWeeklyLabel)), `${locale}: missing quotaWeeklyLabel`)
+      assert.ok(html.includes(escapeHtml(msg.quotaNotApplicable)), `${locale}: missing quotaNotApplicable`)
+      assert.ok(html.includes(escapeHtml(msg.quotaWeeklyOnlyHint)), `${locale}: missing quotaWeeklyOnlyHint`)
+      assert.ok(html.includes(escapeHtml(msg.quotaLocalUsage5h)), `${locale}: missing quotaLocalUsage5h`)
+      assert.ok(html.includes(escapeHtml(msg.quotaLocalUsage7d)), `${locale}: missing quotaLocalUsage7d`)
+    }
+  })
+
+  test('formats future resetCredits.nextExpiresAt as future expiry countdown, never Just now', () => {
+    const now = Date.UTC(2026, 10, 17, 12, 0, 0)
+    const snap = createQuotaTestSnapshot(
+      {
+        source: 'live',
+        syncedAt: now,
+        refreshing: false,
+        lastError: null,
+        providers: [
+          createProviderSnapshot('codex', {
+            status: 'ok',
+            session: null,
+            weekly: {
+              usedPercent: 41,
+              windowMinutes: 10080,
+              resetsAt: now + 2 * 86_400_000,
+              resetDescription: null
+            },
+            resetCredits: {
+              availableCount: 3,
+              totalEarnedCount: 3,
+              nextExpiresAt: now + 14 * 86_400_000
+            }
+          })
+        ]
+      },
+      now
+    )
+
+    const html = renderDashboardShellHtml({
+      snap,
+      tab: 'quotas',
+      scope: 'all',
+      locale: 'en',
+      nowMs: now
+    })
+
+    const creditsMatch = html.match(/<div class="tp-quota-credits-pill">([\s\S]*?)<\/div>/)
+    assert.ok(creditsMatch, 'missing tp-quota-credits-pill')
+    assert.ok(!creditsMatch[1].includes(getMessages('en').justNow), `unexpected Just now: ${creditsMatch[1]}`)
+    assert.ok(creditsMatch[1].includes('14d'), `expected 14d in credits pill, got: ${creditsMatch[1]}`)
   })
 })

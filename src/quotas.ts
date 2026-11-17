@@ -54,6 +54,12 @@ function asFiniteNumber(value: unknown): number | null {
   return value
 }
 
+function normalizeEpochMs(value: unknown): number | null {
+  const num = asFiniteNumber(value)
+  if (num === null || num <= 0) return null
+  return num < 1e12 ? num * 1000 : num
+}
+
 function clampPercent(value: unknown): number | null {
   const num = asFiniteNumber(value)
   if (num === null) return null
@@ -105,8 +111,7 @@ function parseQuotaWindow(raw: unknown): QuotaWindow | null {
   if (usedPercent === null) return null
   const windowMinutesRaw = asFiniteNumber(obj.windowMinutes)
   const windowMinutes = windowMinutesRaw !== null && windowMinutesRaw >= 0 ? windowMinutesRaw : 0
-  const resetsAtRaw = asFiniteNumber(obj.resetsAt)
-  const resetsAt = resetsAtRaw !== null && resetsAtRaw > 0 ? resetsAtRaw : null
+  const resetsAt = normalizeEpochMs(obj.resetsAt)
   const resetDescription = asString(obj.resetDescription)
   return {
     usedPercent,
@@ -122,11 +127,10 @@ function parseResetCredits(raw: unknown): QuotaResetCredits | null {
   const availableCount = asFiniteNumber(obj.availableCount)
   const totalEarnedCount = asFiniteNumber(obj.totalEarnedCount)
   if (availableCount === null && totalEarnedCount === null) return null
-  const nextExpiresAtRaw = asFiniteNumber(obj.nextExpiresAt)
   return {
     availableCount: Math.max(0, Math.round(availableCount ?? 0)),
     totalEarnedCount: Math.max(0, Math.round(totalEarnedCount ?? 0)),
-    nextExpiresAt: nextExpiresAtRaw !== null && nextExpiresAtRaw > 0 ? nextExpiresAtRaw : null
+    nextExpiresAt: normalizeEpochMs(obj.nextExpiresAt)
   }
 }
 

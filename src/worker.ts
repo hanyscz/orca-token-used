@@ -388,9 +388,9 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
 
   async function refreshQuotasAndPersist(force = false): Promise<QuotasSnapshot> {
     const snap = await quotas.refresh(force, Date.now(), lastScannedSessions, pricing)
-    if (snap.source === 'live') {
+    if (!stopped && snap.source === 'live') {
       const cached = quotas.toStorableCache()
-      if (cached) {
+      if (cached && !stopped) {
         try {
           await orca.storage.set(QUOTAS_STORAGE_KEY, cached as unknown as import('orca/worker').JsonValue)
         } catch {

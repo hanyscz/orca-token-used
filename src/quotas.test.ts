@@ -255,6 +255,16 @@ describe('Quotas payload parser, local rolling usage, and QuotaEngine', () => {
     assert.equal(claude.weekly, null)
   })
 
+  test('normalizes 10-digit epoch seconds to ms for resetsAt and nextExpiresAt while preserving ms', () => {
+    const payload = sampleAccountListPayload()
+    payload.result.rateLimits.codex.weekly.resetsAt = 1794988386
+    payload.result.rateLimits.codex.rateLimitResetCredits.nextExpiresAt = 1796068433
+    const providers = parseOrcaAccountListPayload(payload)
+    assert.equal(providers[0].weekly?.resetsAt, 1794988386000)
+    assert.equal(providers[0].resetCredits?.nextExpiresAt, 1796068433000)
+    assert.equal(providers[1].session?.resetsAt, 1794885620000)
+  })
+
   test('clamps percentages to [0, 100] and rejects invalid payloads', () => {
     const payload = sampleAccountListPayload()
     payload.result.rateLimits.codex.weekly.usedPercent = 145

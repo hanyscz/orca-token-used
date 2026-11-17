@@ -20,6 +20,7 @@ import type {
 } from '../protocol'
 import {
   formatCountdown,
+  formatDurationSpan,
   formatRateTokPerSec,
   formatRelativeTime,
   formatScaleTokPerSec,
@@ -964,11 +965,13 @@ function formatResetCreditsSummary(
   msg: UiMessages
 ): string {
   const countText = msg.quotaResetCredits(credits.availableCount)
-  if (!credits.nextExpiresAt) return countText
+  if (!credits.nextExpiresAt || !Number.isFinite(credits.nextExpiresAt)) return countText
+  if (credits.nextExpiresAt > nowMs) {
+    const span = formatDurationSpan(credits.nextExpiresAt - nowMs)
+    return span ? `${countText} · ${msg.quotaNextExpiry(span)}` : countText
+  }
   const expText = formatRelativeTime(credits.nextExpiresAt, nowMs, msg)
-  if (expText) return `${countText} · ${msg.quotaNextExpiry(expText)}`
-  const futureDays = Math.max(1, Math.ceil((credits.nextExpiresAt - nowMs) / 86_400_000))
-  return `${countText} · ${msg.quotaNextExpiry(`${futureDays}d`)}`
+  return expText ? `${countText} · ${msg.quotaNextExpiry(expText)}` : countText
 }
 
 function renderQuotaWindowTile(
@@ -2036,7 +2039,7 @@ function initBrowserPanel(): void {
     }
 
     if (target.closest('#btn-refresh')) {
-      if (isRefreshing) return
+      if (isRefreshing || typeof window.orca === 'undefined') return
       isRefreshing = true
       const refreshingQuotasToo = currentTab === 'quotas'
       if (refreshingQuotasToo) {
