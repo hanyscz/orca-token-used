@@ -82,10 +82,10 @@ The plugin requires Orca `>=1.4.248`.
 Release a new version with:
 
 ```bash
-scripts/publish-plugin.sh 0.1.3
+scripts/publish-plugin.sh 0.1.4
 ```
 
-The script updates the manifest version, validates and tests the plugin, commits the release, pushes `main`, creates the matching `v0.1.3` tag, and prints the Orca directory URL.
+The script updates the manifest version, validates and tests the plugin, commits the release, pushes `main`, creates the matching `v0.1.4` tag, and prints the Orca directory URL.
 
 ## License
 

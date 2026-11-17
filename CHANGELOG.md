@@ -2,6 +2,14 @@
 
 All notable changes to Token Pulse are documented in this file.
 
+## [0.1.4] - 2026-11-17
+
+### Added
+- **Readable subagent names across Antigravity, Codex, and Claude Code**:
+  - **Antigravity**: Queries `agent_name` from `conversation_summaries.db` (e.g., `backend`, `frontend`, `verifier`, `monitor`) with raw UUID filtering.
+  - **Codex**: Extracts `agent_role`, `agent_path` basename, and `agent_nickname` from `session_meta` / `thread_spawn` metadata (e.g., `premortem_merge · Linnaeus`).
+  - **Claude Code**: Correlates parent `Task`/`Agent` `tool_use` descriptions and `subagent_type` via `toolUseResult.agentId`, with bounded (64 KiB) sibling `agent-<id>.meta.json` `agentType` fallback and mtime/delete cache tracking.
+
 ## [0.1.3] - 2026-11-17
 
 ### Added
