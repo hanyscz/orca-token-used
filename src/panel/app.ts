@@ -4,7 +4,14 @@ import type {
   AgentRunState,
   DashboardSnapshot,
   LiveAgentCard,
+  LocalQuotaUsageWindow,
   PeriodSummary,
+  QuotaAccountSummary,
+  QuotaProviderKind,
+  QuotaProviderSnapshot,
+  QuotaResetCredits,
+  QuotasSnapshot,
+  QuotaWindow,
   ScopeMode,
   TimeBucket,
   TokenBreakdown,
@@ -12,6 +19,7 @@ import type {
   WorktreeSessionItem
 } from '../protocol'
 import {
+  formatCountdown,
   formatRateTokPerSec,
   formatRelativeTime,
   formatScaleTokPerSec,
@@ -29,9 +37,9 @@ const AGENT_COLORS: Record<AgentKind, string> = {
   gemini: '#38bdf8'
 }
 
-export const TAB_ORDER: readonly ViewTab[] = ['live', 'sessions', 'day', 'week', 'month']
+export const TAB_ORDER: readonly ViewTab[] = ['live', 'sessions', 'day', 'week', 'month', 'quotas']
 
-/** Pure SVG icons for the 5 view tabs */
+/** Pure SVG icons for the 6 view tabs */
 export const TAB_ICONS_SVG: Record<ViewTab, string> = {
   // Lightning pulse / Live activity
   live: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`,
@@ -42,7 +50,9 @@ export const TAB_ICONS_SVG: Record<ViewTab, string> = {
   // Week (7-day bar calendar)
   week: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14h8"/></svg>`,
   // Month (30-day grid calendar)
-  month: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><circle cx="8" cy="14" r="1" fill="currentColor"/><circle cx="12" cy="14" r="1" fill="currentColor"/><circle cx="16" cy="14" r="1" fill="currentColor"/><circle cx="8" cy="18" r="1" fill="currentColor"/><circle cx="12" cy="18" r="1" fill="currentColor"/><circle cx="16" cy="18" r="1" fill="currentColor"/></svg>`
+  month: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><circle cx="8" cy="14" r="1" fill="currentColor"/><circle cx="12" cy="14" r="1" fill="currentColor"/><circle cx="16" cy="14" r="1" fill="currentColor"/><circle cx="8" cy="18" r="1" fill="currentColor"/><circle cx="12" cy="18" r="1" fill="currentColor"/><circle cx="16" cy="18" r="1" fill="currentColor"/></svg>`,
+  // Quotas (240-degree gauge arc + needle)
+  quotas: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5.64 19.36a9 9 0 1 1 12.72 0"/><path d="M12 13l3.5-3.5"/><circle cx="12" cy="13" r="1.5" fill="currentColor" stroke="none"/></svg>`
 }
 
 /** Dynamic multi-wave + energy spark emblem for header branding */
@@ -911,6 +921,379 @@ function renderPeriodView(
   `
 }
 
+const QUOTA_ARC_RADIUS = 38
+const QUOTA_ARC_LEN = (240 / 360) * 2 * Math.PI * QUOTA_ARC_RADIUS
+const QUOTA_ARC_PATH = 'M 17.09 71.00 A 38 38 0 1 1 82.91 71.00'
+
+export function getQuotaSeverity(usedPercent: number): 'normal' | 'warn' | 'crit' {
+  const pct = Number.isFinite(usedPercent) ? usedPercent : 0
+  if (pct >= 90) return 'crit'
+  if (pct >= 75) return 'warn'
+  return 'normal'
+}
+
+export function renderQuotaGaugeSvg(usedPercent: number, usedLabel: string): string {
+  const pct = Math.max(0, Math.min(100, Number.isFinite(usedPercent) ? usedPercent : 0))
+  const severity = getQuotaSeverity(pct)
+  const pctDisplay = Math.round(pct)
+  const dashOffset = QUOTA_ARC_LEN * (1 - pct / 100)
+  const fillPath =
+    pct > 0
+      ? `<path class="tp-quota-arc-fill tp-quota-arc-${severity}" d="${QUOTA_ARC_PATH}" fill="none" stroke-width="7.5" stroke-linecap="round" stroke-dasharray="${QUOTA_ARC_LEN.toFixed(2)} ${QUOTA_ARC_LEN.toFixed(2)}" stroke-dashoffset="${dashOffset.toFixed(2)}"/>`
+      : ''
+
+  return `
+    <svg class="tp-quota-gauge-svg" viewBox="0 0 100 86" role="img" aria-label="${pctDisplay}% ${escapeHtml(usedLabel)}">
+      <path class="tp-quota-arc-track" d="${QUOTA_ARC_PATH}" fill="none" stroke-width="7.5" stroke-linecap="round"/>
+      ${fillPath}
+      <text class="tp-quota-pct-text tp-quota-pct-${severity}" x="50" y="52" text-anchor="middle" dominant-baseline="central">${pctDisplay}%</text>
+      <text class="tp-quota-pct-sub" x="50" y="69" text-anchor="middle">${escapeHtml(usedLabel)}</text>
+    </svg>
+  `
+}
+
+function quotaProviderLogoHtml(provider: QuotaProviderKind): string {
+  if (provider === 'codex') return providerLogoHtml('OpenAI', 'codex')
+  if (provider === 'claude') return providerLogoHtml('Anthropic', 'claude')
+  return providerLogoHtml('Antigravity', 'antigravity')
+}
+
+function formatResetCreditsSummary(
+  credits: QuotaResetCredits,
+  nowMs: number,
+  msg: UiMessages
+): string {
+  const countText = msg.quotaResetCredits(credits.availableCount)
+  if (!credits.nextExpiresAt) return countText
+  const expText = formatRelativeTime(credits.nextExpiresAt, nowMs, msg)
+  if (expText) return `${countText} · ${msg.quotaNextExpiry(expText)}`
+  const futureDays = Math.max(1, Math.ceil((credits.nextExpiresAt - nowMs) / 86_400_000))
+  return `${countText} · ${msg.quotaNextExpiry(`${futureDays}d`)}`
+}
+
+function renderQuotaWindowTile(
+  windowData: QuotaWindow,
+  windowLabel: string,
+  msg: UiMessages,
+  nowMs: number
+): string {
+  const countdown = formatCountdown(windowData.resetsAt, nowMs, msg)
+  const desc = windowData.resetDescription?.trim() || ''
+  const primaryMeta = countdown || desc || '—'
+  const secondaryMeta = countdown && desc ? desc : ''
+  const metaTitle = [countdown, desc].filter(Boolean).join(' · ')
+
+  return `
+    <div class="tp-quota-gauge-tile">
+      ${renderQuotaGaugeSvg(windowData.usedPercent, msg.quotaUsedLabel)}
+      <div class="tp-quota-window-title">${escapeHtml(windowLabel)}</div>
+      <div class="tp-quota-reset-meta" title="${escapeHtml(metaTitle)}">${escapeHtml(primaryMeta)}</div>
+      ${secondaryMeta ? `<div class="tp-quota-reset-meta" title="${escapeHtml(secondaryMeta)}">${escapeHtml(secondaryMeta)}</div>` : ''}
+    </div>
+  `
+}
+
+function renderQuotaNaTile(
+  windowLabel: string,
+  hint: string,
+  resetCredits: QuotaResetCredits | null,
+  msg: UiMessages,
+  nowMs: number
+): string {
+  const creditsHtml = resetCredits
+    ? `<div class="tp-quota-credits-pill">${escapeHtml(formatResetCreditsSummary(resetCredits, nowMs, msg))}</div>`
+    : ''
+  return `
+    <div class="tp-quota-na-tile">
+      <div class="tp-quota-na-head">
+        <span class="tp-quota-window-title">${escapeHtml(windowLabel)}</span>
+        <span class="tp-quota-na-badge">${escapeHtml(msg.quotaNotApplicable)}</span>
+      </div>
+      <div class="tp-quota-na-hint">${escapeHtml(hint)}</div>
+      ${creditsHtml}
+    </div>
+  `
+}
+
+function renderLocalUsageTiles(
+  local: { window5h: LocalQuotaUsageWindow; window7d: LocalQuotaUsageWindow },
+  msg: UiMessages
+): string {
+  const entries: Array<{ label: string; data: LocalQuotaUsageWindow }> = [
+    { label: msg.quotaLocalUsage5h, data: local.window5h },
+    { label: msg.quotaLocalUsage7d, data: local.window7d }
+  ]
+  return `
+    <div class="tp-quota-local-grid">
+      ${entries
+        .map(({ label, data }) => {
+          const hitsHtml =
+            data.rateLimitHits !== null && data.rateLimitHits > 0
+              ? `<span class="tp-quota-429-badge">${escapeHtml(msg.quotaRateLimitsShort(data.rateLimitHits))}</span>`
+              : ''
+          return `
+            <div class="tp-quota-local-tile">
+              <div class="tp-quota-local-head">
+                <span>${escapeHtml(label)}</span>
+                ${hitsHtml}
+              </div>
+              <div class="tp-quota-local-val">${formatTokens(data.totalTokens)} tok</div>
+              <div class="tp-quota-local-meta">
+                <span class="tp-cost-pill">${formatUsd(data.costUsd)}</span>
+                <span>${escapeHtml(msg.quotaTurnsShort(data.turnCount))}</span>
+              </div>
+            </div>
+          `
+        })
+        .join('')}
+    </div>
+  `
+}
+
+function renderLocalUsageCompactStrip(
+  local: { window5h: LocalQuotaUsageWindow; window7d: LocalQuotaUsageWindow },
+  msg: UiMessages
+): string {
+  const hits5h = local.window5h.rateLimitHits ?? 0
+  const hits7d = local.window7d.rateLimitHits ?? 0
+  const totalHits = hits5h + hits7d
+  return `
+    <div class="tp-quota-local-strip">
+      <span>${escapeHtml(msg.quotaLocalUsage5h)}: <strong style="color:var(--tp-fg)">${formatTokens(local.window5h.totalTokens)}</strong> · <span class="tp-cost-pill">${formatUsd(local.window5h.costUsd)}</span></span>
+      <span>${escapeHtml(msg.quotaLocalUsage7d)}: <strong style="color:var(--tp-fg)">${formatTokens(local.window7d.totalTokens)}</strong> · <span class="tp-cost-pill">${formatUsd(local.window7d.costUsd)}</span></span>
+      ${totalHits > 0 ? `<span class="tp-quota-429-badge">${escapeHtml(msg.quotaRateLimitsShort(totalHits))}</span>` : ''}
+    </div>
+  `
+}
+
+function renderQuotaPoolSection(
+  pool: QuotaPool,
+  msg: UiMessages,
+  nowMs: number
+): string {
+  const leftTile = pool.session
+    ? renderQuotaWindowTile(pool.session, msg.quota5hLabel, msg, nowMs)
+    : renderQuotaNaTile(msg.quota5hLabel, msg.quotaWeeklyOnlyHint, null, msg, nowMs)
+  const rightTile = pool.weekly
+    ? renderQuotaWindowTile(pool.weekly, msg.quotaWeeklyLabel, msg, nowMs)
+    : renderQuotaNaTile(msg.quotaWeeklyLabel, msg.quotaNotApplicable, null, msg, nowMs)
+
+  return `
+    <div class="tp-quota-pool-block">
+      <div class="tp-quota-pool-title">
+        <span>${escapeHtml(pool.label)}</span>
+      </div>
+      <div class="tp-quota-gauge-grid">
+        ${leftTile}
+        ${rightTile}
+      </div>
+    </div>
+  `
+}
+
+function formatAccountMiniSummary(acc: QuotaAccountSummary, msg: UiMessages): string {
+  if (acc.pools.length > 0) {
+    return acc.pools
+      .map((pool) => {
+        const s = pool.session ? `${Math.round(pool.session.usedPercent)}%` : msg.quotaNotApplicable
+        const w = pool.weekly ? `${Math.round(pool.weekly.usedPercent)}%` : msg.quotaNotApplicable
+        return `${pool.label}: ${s}/${w}`
+      })
+      .join(' · ')
+  }
+  if (acc.session || acc.weekly) {
+    const s = acc.session ? `5h ${Math.round(acc.session.usedPercent)}%` : `5h ${msg.quotaNotApplicable}`
+    const w = acc.weekly ? `7d ${Math.round(acc.weekly.usedPercent)}%` : `7d ${msg.quotaNotApplicable}`
+    return `${s} · ${w}`
+  }
+  return acc.error || acc.status
+}
+
+function renderQuotaProviderCard(
+  p: QuotaProviderSnapshot,
+  msg: UiMessages,
+  nowMs: number,
+  collapsedGroups: CollapsedGroups
+): string {
+  const statusLabel =
+    p.status === 'ok'
+      ? msg.quotaStatusOk
+      : p.status === 'loading'
+        ? msg.quotaSourceLoading
+        : p.status === 'error'
+          ? msg.quotaErrorLabel
+          : msg.quotaNotApplicable
+
+  const authChip = p.authKind
+    ? `<span class="tp-quota-auth-chip">${escapeHtml(p.authKind)}</span>`
+    : ''
+  const emailRow = p.accountEmail
+    ? `<div class="tp-quota-email" title="${escapeHtml(p.accountEmail)}">${escapeHtml(p.accountEmail)}</div>`
+    : ''
+
+  let bodyHtml = ''
+  if (p.pools.length > 0) {
+    bodyHtml = `
+      ${p.pools.map((pool) => renderQuotaPoolSection(pool, msg, nowMs)).join('')}
+      ${renderLocalUsageCompactStrip(p.local, msg)}
+    `
+  } else if (p.status === 'ok' && (p.session !== null || p.weekly !== null)) {
+    const leftTile = p.session
+      ? renderQuotaWindowTile(p.session, msg.quota5hLabel, msg, nowMs)
+      : renderQuotaNaTile(msg.quota5hLabel, msg.quotaWeeklyOnlyHint, p.resetCredits, msg, nowMs)
+    const rightTile = p.weekly
+      ? renderQuotaWindowTile(p.weekly, msg.quotaWeeklyLabel, msg, nowMs)
+      : renderQuotaNaTile(msg.quotaWeeklyLabel, msg.quotaNotApplicable, null, msg, nowMs)
+    const extraCreditsHtml =
+      p.session !== null && p.resetCredits
+        ? `<div class="tp-quota-credits-pill">${escapeHtml(formatResetCreditsSummary(p.resetCredits, nowMs, msg))}</div>`
+        : ''
+
+    bodyHtml = `
+      <div class="tp-quota-gauge-grid">
+        ${leftTile}
+        ${rightTile}
+      </div>
+      ${extraCreditsHtml}
+      ${renderLocalUsageCompactStrip(p.local, msg)}
+    `
+  } else {
+    const reasonText =
+      p.status === 'loading'
+        ? msg.quotaLoadingLabel
+        : p.error || (p.status === 'error' ? msg.quotaErrorLabel : msg.quotaUnavailableLabel)
+    const reasonCls =
+      p.status === 'error' ? 'tp-quota-reason-banner tp-quota-reason-error' : 'tp-quota-reason-banner'
+    bodyHtml = `
+      <div class="${reasonCls}">${escapeHtml(reasonText)}</div>
+      ${renderLocalUsageTiles(p.local, msg)}
+    `
+  }
+
+  let accountsHtml = ''
+  if (p.accounts.length > 1) {
+    const groupKey = `quotas:accounts:${p.provider}`
+    const rows = p.accounts
+      .map((acc) => {
+        const name = acc.email || acc.label || acc.id || acc.authKind || 'account'
+        const summary = formatAccountMiniSummary(acc, msg)
+        return `
+          <div class="tp-quota-account-row">
+            <span class="tp-quota-account-email" title="${escapeHtml(name)}">
+              ${escapeHtml(name)}${acc.active ? ` · <strong style="color:var(--tp-quota-ok)">${escapeHtml(msg.quotaActiveAccountBadge)}</strong>` : ''}
+            </span>
+            <span style="color:var(--tp-muted);flex-shrink:0" title="${escapeHtml(summary)}">${escapeHtml(summary)}</span>
+          </div>
+        `
+      })
+      .join('')
+    accountsHtml = renderCollapseGroup(
+      groupKey,
+      msg.quotaOtherAccounts,
+      p.accounts.length,
+      `<div class="tp-list" style="gap:4px">${rows}</div>`,
+      collapsedGroups[groupKey] ?? true
+    )
+  }
+
+  return `
+    <section class="tp-quota-card" aria-label="${escapeHtml(p.label)}">
+      <div class="tp-quota-card-hdr">
+        <div class="tp-quota-provider-id">
+          ${quotaProviderLogoHtml(p.provider)}
+          <div class="tp-quota-provider-meta">
+            <div class="tp-quota-provider-name-row">
+              <span class="tp-quota-provider-name">${escapeHtml(p.label)}</span>
+              ${authChip}
+            </div>
+            ${emailRow}
+          </div>
+        </div>
+        <span class="tp-quota-status-pill tp-quota-status-${escapeHtml(p.status)}">${escapeHtml(statusLabel)}</span>
+      </div>
+      ${bodyHtml}
+      ${accountsHtml}
+    </section>
+  `
+}
+
+export function renderQuotasView(
+  snap: DashboardSnapshot,
+  msg: UiMessages,
+  nowMs: number,
+  collapsedGroups: CollapsedGroups = {},
+  isRefreshingQuotas = false,
+  quotasError: string | null = null
+): string {
+  const quotas: QuotasSnapshot | undefined = snap.quotas
+  const syncing = isRefreshingQuotas || Boolean(quotas?.refreshing) || quotas?.source === 'loading'
+
+  const sourceLabel = syncing
+    ? msg.quotaSourceLoading
+    : quotas?.source === 'live'
+      ? msg.quotaSourceLive
+      : quotas?.source === 'cache'
+        ? msg.quotaSourceCache
+        : quotas?.source === 'error'
+          ? msg.quotaSourceError
+          : msg.quotaNoDataLabel
+
+  const syncRel = quotas?.syncedAt ? formatRelativeTime(quotas.syncedAt, nowMs, msg) : ''
+  const dotColor = syncing
+    ? 'var(--tp-quota-warn)'
+    : quotas?.source === 'live'
+      ? 'var(--tp-quota-ok)'
+      : quotas?.source === 'error'
+        ? 'var(--tp-quota-crit)'
+        : 'var(--tp-muted)'
+
+  const toolbarHtml = `
+    <div class="tp-quota-toolbar">
+      <span class="tp-quota-source-pill">
+        <i class="tp-dot" style="background:${dotColor};margin-right:0"></i>
+        <span>${escapeHtml(sourceLabel)}${syncRel ? ` · ${escapeHtml(syncRel)}` : ''}</span>
+      </span>
+      <button
+        type="button"
+        class="tp-quota-refresh-btn ${syncing ? 'tp-spinning' : ''}"
+        data-quotas-refresh="1"
+        ${syncing ? 'disabled' : ''}
+        title="${escapeHtml(msg.quotaRefreshAction)}"
+      >
+        ${REFRESH_ICON_SVG}
+        <span>${escapeHtml(msg.quotaRefreshAction)}</span>
+      </button>
+    </div>
+  `
+
+  const effectiveError = quotasError || quotas?.lastError || null
+  const errorBannerHtml = effectiveError
+    ? `<div class="tp-quota-reason-banner tp-quota-reason-error">${escapeHtml(effectiveError)}</div>`
+    : ''
+
+  if (!quotas) {
+    return `
+      <div class="tp-quota-list">
+        ${toolbarHtml}
+        ${errorBannerHtml}
+        <div class="tp-empty">${escapeHtml(msg.quotaLoadingLabel)}</div>
+      </div>
+    `
+  }
+
+  const cardsHtml = quotas.providers
+    .map((p) => renderQuotaProviderCard(p, msg, nowMs, collapsedGroups))
+    .join('')
+
+  return `
+    <div class="tp-quota-list">
+      ${toolbarHtml}
+      ${errorBannerHtml}
+      ${cardsHtml || `<div class="tp-empty">${escapeHtml(msg.quotaNoDataLabel)}</div>`}
+    </div>
+  `
+}
+
 export function renderDashboardShellHtml(params: {
   snap: DashboardSnapshot | null
   tab: ViewTab
@@ -919,7 +1302,9 @@ export function renderDashboardShellHtml(params: {
   selectedLiveAgentKey?: string | null
   liveDetailAgent?: LiveAgentCard | null
   isRefreshing?: boolean
+  isRefreshingQuotas?: boolean
   isSyncingPricing?: boolean
+  quotasError?: string | null
   collapsedGroups?: CollapsedGroups
   nowMs?: number
 }): string {
@@ -931,7 +1316,9 @@ export function renderDashboardShellHtml(params: {
     selectedLiveAgentKey = null,
     liveDetailAgent = null,
     isRefreshing = false,
+    isRefreshingQuotas = false,
     isSyncingPricing = false,
+    quotasError = null,
     collapsedGroups = {}
   } = params
   const nowMs = params.nowMs ?? Date.now()
@@ -971,6 +1358,8 @@ export function renderDashboardShellHtml(params: {
         </button>
       </div>
     `
+  } else if (tab === 'quotas') {
+    rightControlHtml = ''
   } else if (snap?.workspace.name || snap?.workspace.project) {
     const wtText = formatProjectWorktreeLabel(
       snap.workspace.project,
@@ -982,7 +1371,7 @@ export function renderDashboardShellHtml(params: {
     rightControlHtml = `<span class="tp-worktree-pill">${escapeHtml(msg.allWorkspacesFallback)}</span>`
   }
 
-  let mainBodyHtml = `<div class="tp-empty">Loading…</div>`
+  let mainBodyHtml = `<div class="tp-empty">${escapeHtml(tab === 'quotas' ? msg.quotaLoadingLabel : 'Loading…')}</div>`
   let pricingFooterHtml = ''
 
   if (snap) {
@@ -994,6 +1383,15 @@ export function renderDashboardShellHtml(params: {
       }
     } else if (tab === 'sessions') {
       mainBodyHtml = renderSessionsView(snap, msg, nowMs, collapsedGroups)
+    } else if (tab === 'quotas') {
+      mainBodyHtml = renderQuotasView(
+        snap,
+        msg,
+        nowMs,
+        collapsedGroups,
+        isRefreshingQuotas,
+        quotasError
+      )
     } else {
       const scopeBag = snap.periods[scope]
       mainBodyHtml = renderPeriodView(tab, scopeBag[tab], snap, scope, msg)
@@ -1123,7 +1521,9 @@ function initBrowserPanel(): void {
 
   let snapshot: DashboardSnapshot | null = null
   let isRefreshing = false
+  let isRefreshingQuotas = false
   let isSyncingPricing = false
+  let quotasError: string | null = null
 
   function resolveEffectiveLocale(): string {
     return typeof window.orca?.locale === 'string' && window.orca.locale
@@ -1462,7 +1862,9 @@ function initBrowserPanel(): void {
       selectedLiveAgentKey,
       liveDetailAgent,
       isRefreshing,
+      isRefreshingQuotas,
       isSyncingPricing,
+      quotasError,
       collapsedGroups
     })
 
@@ -1607,23 +2009,84 @@ function initBrowserPanel(): void {
       return
     }
 
+    if (target.closest('[data-quotas-refresh]')) {
+      if (isRefreshingQuotas || typeof window.orca === 'undefined') return
+      isRefreshingQuotas = true
+      quotasError = null
+      renderApp()
+      try {
+        const freshQuotas = await window.orca.plugin.request('quotas.refresh', {})
+        if (snapshot) {
+          snapshot = { ...snapshot, quotas: freshQuotas }
+        } else {
+          const nextSnap = await window.orca.plugin.request('dashboard.get', {
+            forceScan: false,
+            locale: resolveEffectiveLocale()
+          })
+          snapshot = { ...nextSnap, quotas: freshQuotas }
+        }
+      } catch (err) {
+        quotasError = err instanceof Error ? err.message : String(err)
+        console.error('Failed to refresh quotas:', err)
+      } finally {
+        isRefreshingQuotas = false
+        renderApp()
+      }
+      return
+    }
+
     if (target.closest('#btn-refresh')) {
       if (isRefreshing) return
       isRefreshing = true
+      const refreshingQuotasToo = currentTab === 'quotas'
+      if (refreshingQuotasToo) {
+        isRefreshingQuotas = true
+        quotasError = null
+      }
       renderApp()
       try {
-        snapshot = await window.orca.plugin.request('dashboard.get', {
-          forceScan: true,
-          locale: resolveEffectiveLocale()
-        })
-        if (selectedLiveAgentKey && snapshot) {
-          const hit = findLiveAgent(snapshot, selectedLiveAgentKey)
-          if (hit) liveDetailAgent = hit
+        if (refreshingQuotasToo) {
+          const [snapRes, quotasRes] = await Promise.allSettled([
+            window.orca.plugin.request('dashboard.get', {
+              forceScan: true,
+              locale: resolveEffectiveLocale()
+            }),
+            window.orca.plugin.request('quotas.refresh', {})
+          ])
+          if (snapRes.status === 'fulfilled') {
+            snapshot = snapRes.value
+          }
+          if (quotasRes.status === 'fulfilled') {
+            if (snapshot) {
+              snapshot = { ...snapshot, quotas: quotasRes.value }
+            }
+          } else {
+            quotasError =
+              quotasRes.reason instanceof Error
+                ? quotasRes.reason.message
+                : String(quotasRes.reason)
+            console.error('Failed to refresh quotas:', quotasRes.reason)
+          }
+          if (snapRes.status === 'rejected') {
+            console.error('Failed to refresh dashboard:', snapRes.reason)
+          }
+        } else {
+          snapshot = await window.orca.plugin.request('dashboard.get', {
+            forceScan: true,
+            locale: resolveEffectiveLocale()
+          })
+          if (selectedLiveAgentKey && snapshot) {
+            const hit = findLiveAgent(snapshot, selectedLiveAgentKey)
+            if (hit) liveDetailAgent = hit
+          }
         }
       } catch (err) {
         console.error('Failed to refresh dashboard:', err)
       } finally {
         isRefreshing = false
+        if (refreshingQuotasToo) {
+          isRefreshingQuotas = false
+        }
         renderApp()
       }
       return
@@ -1718,6 +2181,9 @@ function initBrowserPanel(): void {
 
     window.orca.plugin.on('dashboard.updated', (nextSnap) => {
       snapshot = nextSnap
+      if (nextSnap.quotas && nextSnap.quotas.source !== 'error' && !nextSnap.quotas.lastError) {
+        quotasError = null
+      }
       if (currentTab === 'live' && selectedLiveAgentKey) {
         // Keep header emblem synced without tearing down the 60fps SVG stream
         const emblem = document.querySelector('.tp-brand-emblem')
