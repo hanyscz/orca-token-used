@@ -2,7 +2,9 @@ import type {} from 'orca'
 
 export type AgentKind = 'claude' | 'codex' | 'antigravity' | 'gemini'
 
-export type ViewTab = 'live' | 'sessions' | 'day' | 'week' | 'month'
+export type DashboardTab = 'live' | 'sessions' | 'day' | 'week' | 'month' | 'quotas'
+
+export type ViewTab = DashboardTab
 
 export type ScopeMode = 'all' | 'worktree'
 
@@ -120,6 +122,91 @@ export interface PricingStatus {
   lastError: string | null
 }
 
+export type QuotaProviderKind = 'codex' | 'antigravity' | 'claude'
+
+export type QuotaProviderStatus = 'ok' | 'unavailable' | 'error' | 'loading'
+
+export interface QuotaWindow {
+  /** Percentage of quota used (0-100) */
+  usedPercent: number
+  /** Window duration in minutes (e.g. 300 for 5h, 10080 for 7d) */
+  windowMinutes: number
+  /** Epoch ms when this window resets, or null if unknown */
+  resetsAt: number | null
+  /** Human-readable reset description (e.g. "Wed 3:53 PM"), or null */
+  resetDescription: string | null
+}
+
+export interface QuotaPool {
+  /** Stable slug id (e.g. "gemini-models", "claude-and-gpt-models") */
+  id: string
+  /** Pool display name (e.g. "Gemini Models", "Claude and GPT models") */
+  label: string
+  /** 5-hour window, or null if not available */
+  session: QuotaWindow | null
+  /** 7-day weekly window, or null if not available */
+  weekly: QuotaWindow | null
+}
+
+export interface QuotaResetCredits {
+  availableCount: number
+  totalEarnedCount: number
+  nextExpiresAt: number | null
+}
+
+export interface QuotaAccountSummary {
+  id: string | null
+  email: string | null
+  label: string | null
+  authKind: string | null
+  active: boolean
+  status: QuotaProviderStatus
+  session: QuotaWindow | null
+  weekly: QuotaWindow | null
+  pools: QuotaPool[]
+  error: string | null
+}
+
+export interface LocalQuotaUsageWindow {
+  totalTokens: number
+  inputTokens: number
+  outputTokens: number
+  reasoningTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  costUsd: number
+  turnCount: number
+  sessionCount: number
+  rateLimitHits: number | null
+}
+
+export interface QuotaProviderSnapshot {
+  provider: QuotaProviderKind
+  label: string
+  status: QuotaProviderStatus
+  error: string | null
+  accountEmail: string | null
+  authKind: string | null
+  session: QuotaWindow | null
+  weekly: QuotaWindow | null
+  pools: QuotaPool[]
+  resetCredits: QuotaResetCredits | null
+  accounts: QuotaAccountSummary[]
+  updatedAt: number | null
+  local: {
+    window5h: LocalQuotaUsageWindow
+    window7d: LocalQuotaUsageWindow
+  }
+}
+
+export interface QuotasSnapshot {
+  source: 'live' | 'cache' | 'loading' | 'error'
+  syncedAt: number | null
+  refreshing: boolean
+  lastError: string | null
+  providers: QuotaProviderSnapshot[]
+}
+
 export interface WorkspaceFocusInfo {
   id: string | null
   project: string | null
@@ -132,6 +219,7 @@ export interface DashboardSnapshot {
   generatedAt: number
   workspace: WorkspaceFocusInfo
   pricing: PricingStatus
+  quotas?: QuotasSnapshot
   live: {
     tokens: TokenBreakdown
     tps: TpsStats
@@ -175,6 +263,10 @@ declare module 'orca' {
     'pricing.refresh': {
       input: Record<string, never>
       output: PricingStatus
+    }
+    'quotas.refresh': {
+      input: Record<string, never>
+      output: QuotasSnapshot
     }
     'view.set': {
       input: { tab?: ViewTab; scope?: ScopeMode; locale?: string; liveAgentKey?: string | null }

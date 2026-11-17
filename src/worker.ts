@@ -19,11 +19,12 @@ import {
 import { formatTokens, formatUsd, getMessages } from './panel/i18n'
 import type { SessionTranscriptState } from './parsers'
 import { PRICING_STORAGE_KEY, PricingEngine } from './pricing'
-import type { DashboardSnapshot, ScopeMode, ViewTab } from './protocol'
+import type { DashboardSnapshot, QuotasSnapshot, ScopeMode, ViewTab } from './protocol'
+import { QUOTAS_STORAGE_KEY, QuotaEngine } from './quotas'
 import { HISTORICAL_CACHE_STORAGE_KEY, TranscriptScanner } from './scanner'
 
 const LOCALE_STORAGE_KEY = 'lastLocale.v1'
-const VALID_TABS: readonly ViewTab[] = ['live', 'sessions', 'day', 'week', 'month']
+const VALID_TABS: readonly ViewTab[] = ['live', 'sessions', 'day', 'week', 'month', 'quotas']
 
 let activeCleanup: (() => Promise<void>) | null = null
 
@@ -38,18 +39,21 @@ interface ReadContextResult {
 export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   const disposables: Disposable[] = []
   const pricing = new PricingEngine()
+  const quotas = new QuotaEngine()
   const scanner = new TranscriptScanner()
 
   let pricingSyncHours = 6
   let livePollSeconds = 2
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let pricingTimer: ReturnType<typeof setInterval> | null = null
+  let quotaTimer: ReturnType<typeof setInterval> | null = null
   let statusDebounceTimer: ReturnType<typeof setTimeout> | null = null
   let focusSettleTimer: ReturnType<typeof setTimeout> | null = null
   let tabRenameSettleTimer: ReturnType<typeof setTimeout> | null = null
   let stopped = false
   let refreshInFlight: Promise<DashboardSnapshot> | null = null
   let latestSnapshot: DashboardSnapshot | null = null
+  let lastScannedSessions: SessionTranscriptState[] = []
   let lastHistPersistMs = 0
   let currentLocale = 'zh-TW'
   let activePanelTab: ViewTab = 'live'
@@ -382,6 +386,21 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     }
   }
 
+  async function refreshQuotasAndPersist(force = false): Promise<QuotasSnapshot> {
+    const snap = await quotas.refresh(force, Date.now(), lastScannedSessions, pricing)
+    if (snap.source === 'live') {
+      const cached = quotas.toStorableCache()
+      if (cached) {
+        try {
+          await orca.storage.set(QUOTAS_STORAGE_KEY, cached as unknown as import('orca/worker').JsonValue)
+        } catch {
+          // Ignore storage write error
+        }
+      }
+    }
+    return snap
+  }
+
   async function flushHistoricalCache(force = false): Promise<void> {
     const now = Date.now()
     if (!force && now - lastHistPersistMs < 30_000) return
@@ -439,12 +458,15 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     const run = (async () => {
       await refreshWorkspaceAndAgents(forceFullScan)
       const sessions = scanner.scan({ forceFullDiscovery: forceFullScan })
+      lastScannedSessions = sessions
       const journal = scanner.getJournalIndex()
       seedTerminalTabsFromJournal(journal)
       seedTerminalTabsFromProfileDb()
       resolveFocusedWorkspace(lastReadContext, journal, sessions)
 
-      const snap = buildDashboardSnapshot(sessions, journal, pricing, runtime, Date.now())
+      const now = Date.now()
+      const snap = buildDashboardSnapshot(sessions, journal, pricing, runtime, now)
+      snap.quotas = quotas.getSnapshot(sessions, pricing, now)
       latestSnapshot = snap
 
       try {
@@ -470,6 +492,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   function scheduleTimers(): void {
     if (pollTimer) clearInterval(pollTimer)
     if (pricingTimer) clearInterval(pricingTimer)
+    if (quotaTimer) clearInterval(quotaTimer)
     if (stopped) return
 
     pollTimer = setInterval(() => {
@@ -485,16 +508,26 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
         })
       }
     }, 15 * 60_000)
+
+    quotaTimer = setInterval(() => {
+      if (!stopped && quotas.needsRefresh()) {
+        void refreshQuotasAndPersist(false).then(() => {
+          if (!stopped) void computeAndPublish(false)
+        })
+      }
+    }, 60_000)
   }
 
   try {
-    const [cachedPricing, cachedHist, savedLocale] = await Promise.all([
+    const [cachedPricing, cachedHist, cachedQuotas, savedLocale] = await Promise.all([
       orca.storage.get(PRICING_STORAGE_KEY),
       orca.storage.get(HISTORICAL_CACHE_STORAGE_KEY),
+      orca.storage.get(QUOTAS_STORAGE_KEY),
       orca.storage.get(LOCALE_STORAGE_KEY)
     ])
     if (cachedPricing) pricing.loadFromCache(cachedPricing)
     if (cachedHist) scanner.hydrateHistoricalCache(cachedHist)
+    if (cachedQuotas) quotas.loadFromCache(cachedQuotas)
     if (typeof savedLocale === 'string' && savedLocale.trim()) {
       currentLocale = savedLocale.trim()
     }
@@ -567,9 +600,17 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
 
   disposables.push(
     orca.panels.handle('pricing.refresh', async () => {
-      await syncPricingAndPersist()
+      await Promise.allSettled([syncPricingAndPersist(), refreshQuotasAndPersist(true)])
       await computeAndPublish(false)
       return pricing.getStatus()
+    })
+  )
+
+  disposables.push(
+    orca.panels.handle('quotas.refresh', async () => {
+      await refreshQuotasAndPersist(true)
+      const snap = await computeAndPublish(false)
+      return snap.quotas ?? quotas.getSnapshot(lastScannedSessions, pricing, Date.now())
     })
   )
 
@@ -612,6 +653,11 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
       if (latestSnapshot) {
         await updateStatusBar(latestSnapshot)
       }
+      if (activePanelTab === 'quotas' && quotas.needsRefresh()) {
+        void refreshQuotasAndPersist(false).then(() => {
+          if (!stopped) void computeAndPublish(false)
+        })
+      }
       return {
         tab: activePanelTab,
         scope: activePanelScope,
@@ -624,7 +670,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   // Register Command Palette / Status Bar click command
   disposables.push(
     orca.commands.register('tokenPulse.refresh', async () => {
-      await syncPricingAndPersist()
+      await Promise.allSettled([syncPricingAndPersist(), refreshQuotasAndPersist(true)])
       const snap = await computeAndPublish(true)
       const dayTok = formatTokens(snap.periods.all.day.tokens.total)
       const dayCost = formatUsd(snap.periods.all.day.tokens.costUsd)
@@ -748,12 +794,19 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
       if (!stopped) void computeAndPublish(false)
     })
   }
+  if (quotas.needsRefresh()) {
+    void refreshQuotasAndPersist(false).then(() => {
+      if (!stopped) void computeAndPublish(false)
+    })
+  }
 
   activeCleanup = async () => {
     stopped = true
     pricing.abortInFlight()
+    quotas.abortInFlight()
     if (pollTimer) clearInterval(pollTimer)
     if (pricingTimer) clearInterval(pricingTimer)
+    if (quotaTimer) clearInterval(quotaTimer)
     if (statusDebounceTimer) clearTimeout(statusDebounceTimer)
     if (focusSettleTimer) clearTimeout(focusSettleTimer)
     if (tabRenameSettleTimer) clearTimeout(tabRenameSettleTimer)

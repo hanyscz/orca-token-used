@@ -20,6 +20,7 @@ The plugin uses Orca's `trusted-worker` profile. Orca will show the requested ac
 - Nested subagent cards under parent sessions with parent status elevation while child subagents are active, plus collapsible session groups.
 - Terminal tab and handoff title synchronization across CLI sessions, with click-to-focus terminal navigation.
 - Current model labels and provider-aware USD estimates.
+- 5-hour and weekly (7-day) quota gauges across Codex, Antigravity (Gemini and Claude/GPT model pools), and Claude, paired with local rolling 5h/7d token and USD usage.
 - Online pricing refresh from OpenRouter and models.dev, with offline built-in rates.
 - Light and dark Orca themes.
 
@@ -48,9 +49,9 @@ The worker reads local files in read-only mode to calculate usage and match sess
 - Antigravity: `~/.gemini/antigravity*/brain/**`, `<Orca data>/antigravity-chat/**`, and `<Orca data>/antigravity-accounts/*/**`.
 - Orca: `<Orca data>/agent-session-journal.db`, `<Orca data>/profiles/<active-profile>/profile-state.db`, and the runtime session directories under `<Orca data>/codex-runtime-home/` and `<Orca data>/codex-accounts/`.
 
-Token Pulse uses Orca's current official workspace and agent APIs for focus, status, terminal identity, and terminal focus. Detailed per-turn usage and subagent history still come from the local agent transcripts because the current host does not expose an official session-history API.
+Token Pulse uses Orca's current official workspace and agent APIs for focus, status, terminal identity, and terminal focus, and invokes `orca account list --json` asynchronously (cached for 5 minutes) to read local rate-limit quota windows and pool usage across Codex, Antigravity, and Claude. Detailed per-turn usage and subagent history still come from the local agent transcripts because the current host does not expose an official session-history API.
 
-The settings files are parsed only for model and account-home metadata. Token Pulse uses local paths internally to match sessions, but does not transmit credentials, prompts, responses, transcript contents, or local paths.
+The settings files are parsed only for model and account-home metadata. Token Pulse uses local paths and `orca account list --json` output internally to display quotas and match sessions, and does not modify accounts or transmit credentials, emails, prompts, responses, transcript contents, or local paths.
 
 The only outbound requests are public pricing reads from:
 
