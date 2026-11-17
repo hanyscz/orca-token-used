@@ -289,7 +289,13 @@ function touchTimestamps(state: SessionTranscriptState, tsMs: number | null): vo
 
 function recordReasoningLevel(state: SessionTranscriptState, raw: unknown): void {
   const level = normalizeReasoningLevel(raw)
-  if (level && !state.reasoningLevels.includes(level)) state.reasoningLevels.push(level)
+  if (!level) return
+  const existingIdx = state.reasoningLevels.indexOf(level)
+  if (existingIdx !== -1) {
+    if (existingIdx === state.reasoningLevels.length - 1) return
+    state.reasoningLevels.splice(existingIdx, 1)
+  }
+  state.reasoningLevels.push(level)
 }
 
 function recordReasoningLevelFromObject(state: SessionTranscriptState, obj: Record<string, unknown>): void {
@@ -964,8 +970,12 @@ export function applyAntigravityLines(state: SessionTranscriptState, lines: stri
       if (total <= 0) continue
 
       if (typeof obj.model === 'string' && obj.model.trim()) {
-        state.latestModel = obj.model.trim()
+        const agModel = obj.model.trim()
+        state.latestModel = agModel
+        const suffixLevel = agModel.match(/-(minimal|low|medium|high|xhigh|max)$/i)?.[1]
+        if (suffixLevel) recordReasoningLevel(state, suffixLevel)
       }
+      recordReasoningLevelFromObject(state, obj)
 
       const startOrTurnMs = tsMs ?? (state.updatedAtMs || Date.now())
       const generatedOut = output + reasoning

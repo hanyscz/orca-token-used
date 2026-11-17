@@ -644,9 +644,10 @@ function enrichSessions(
         st.titleHint ||
         fallbackIdTitle
 
-    // Orca's journal stores the model currently selected for the session. Prefer it when a
-    // transcript contains earlier turns from a model that was later changed in the same chat.
-    const modelLabel = jMeta?.model || summary.topModel || fallbackModel
+    // Prefer Orca's journal model when present, otherwise use the session's latest active model
+    // so mid-session `/model` switches are reflected immediately instead of sticking to an earlier
+    // higher-token model (`summary.topModel`).
+    const modelLabel = jMeta?.model || st.latestModel || summary.topModel || fallbackModel
     const providerLabel = providerLabelForAgent(st.agent, modelLabel)
 
     out.push({

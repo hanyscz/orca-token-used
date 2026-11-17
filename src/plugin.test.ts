@@ -4239,4 +4239,53 @@ describe('Readable Subagent Titles & Metadata Wiring', () => {
       fs.rmSync(tmpRoot, { recursive: true, force: true })
     }
   })
+
+  test('displays latest active model and reasoning effort after mid-session /model switch even when earlier model has more cumulative tokens', () => {
+    const now = Date.now()
+    const st = createEmptySessionState(
+      'agy-model-switch',
+      'antigravity',
+      '/tmp/agy-cli/brain/agy-model-switch/.system_generated/logs/transcript.jsonl'
+    )
+    st.cwd = '/tmp/qbibotlive/optimization'
+    st.lastMtimeMs = now - 1_000
+    applyAntigravityLines(st, [
+      JSON.stringify({
+        step_index: 1,
+        type: 'USER_INPUT',
+        created_at: new Date(now - 600_000).toISOString(),
+        content: 'Initial analysis'
+      }),
+      JSON.stringify({
+        step_index: 2,
+        type: 'PLANNER_RESPONSE',
+        created_at: new Date(now - 590_000).toISOString(),
+        model: 'gemini-4-hydrogen-high',
+        input_tokens: 1_000_000,
+        cache_read_tokens: 75_000_000,
+        output_tokens: 50_000
+      }),
+      JSON.stringify({
+        step_index: 3,
+        type: 'PLANNER_RESPONSE',
+        created_at: new Date(now - 2_000).toISOString(),
+        model: 'gemini-4-carbon-medium',
+        input_tokens: 100_000,
+        cache_read_tokens: 4_000_000,
+        output_tokens: 10_000
+      })
+    ])
+
+    const snap = buildDashboardSnapshot(
+      [st],
+      createTestJournalIndex(),
+      new PricingEngine(),
+      { focusedName: 'optimization', focusedBranch: 'optimization', focusedPath: st.cwd, liveAgents: [] },
+      now
+    )
+    assert.equal(snap.sessions[0]?.modelLabel, 'gemini-4-carbon-medium')
+    assert.deepEqual(snap.sessions[0]?.reasoningLevels, ['High', 'Medium'])
+    assert.equal(snap.live.agents[0]?.modelLabel, 'gemini-4-carbon-medium')
+    assert.deepEqual(snap.live.agents[0]?.reasoningLevels, ['High', 'Medium'])
+  })
 })
