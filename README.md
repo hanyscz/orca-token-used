@@ -66,7 +66,6 @@ Transcript contents, prompts, responses, and local paths are not sent to those e
 | --- | ---: | --- |
 | Live pricing sync interval | 6 hours | How often online model rates are refreshed. |
 | Live transcript refresh interval | 2 seconds | How often active transcripts are tailed. |
-|                                  |           |                                             |
 
 ## Development
 
@@ -83,10 +82,10 @@ The plugin requires Orca `>=1.4.248`.
 Release a new version with:
 
 ```bash
-scripts/publish-plugin.sh 0.1.2
+scripts/publish-plugin.sh 0.1.3
 ```
 
-The script updates the manifest version, validates and tests the plugin, commits the release, pushes `main`, creates the matching `v0.1.2` tag, and prints the Orca directory URL.
+The script updates the manifest version, validates and tests the plugin, commits the release, pushes `main`, creates the matching `v0.1.3` tag, and prints the Orca directory URL.
 
 ## License
 

@@ -124,7 +124,7 @@ if [[ " $TOPICS " != *" orca-plugin "* ]]; then
   gh repo edit "$REPO" --add-topic orca-plugin
 fi
 
-git add -A -- README.md LICENSE orca-plugin.json tsconfig.json token-pulse-plan.md .gitignore assets docs scripts src
+git add -A -- README.md LICENSE CHANGELOG.md orca-plugin.json tsconfig.json token-pulse-plan.md .gitignore assets docs scripts src
 if git diff --cached --quiet; then
   echo "No release changes to commit." >&2
   exit 1
