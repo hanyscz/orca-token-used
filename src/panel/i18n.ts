@@ -53,6 +53,31 @@ export interface UiMessages {
   hoursAgo: (h: number) => string
   daysAgo: (d: number) => string
   activeBadge: string
+  quota5hLabel: string
+  quotaWeeklyLabel: string
+  quotaUsedLabel: string
+  quotaResetsIn: (countdown: string) => string
+  quotaResetSoon: string
+  quotaNotApplicable: string
+  quotaWeeklyOnlyHint: string
+  quotaResetCredits: (count: number) => string
+  quotaNextExpiry: (when: string) => string
+  quotaLocalUsage5h: string
+  quotaLocalUsage7d: string
+  quotaTurnsShort: (count: number) => string
+  quotaRateLimitsShort: (count: number) => string
+  quotaUnavailableLabel: string
+  quotaErrorLabel: string
+  quotaLoadingLabel: string
+  quotaNoDataLabel: string
+  quotaSourceLive: string
+  quotaSourceCache: string
+  quotaSourceLoading: string
+  quotaSourceError: string
+  quotaRefreshAction: string
+  quotaOtherAccounts: string
+  quotaActiveAccountBadge: string
+  quotaStatusOk: string
   states: Record<AgentRunState, string>
   agentNames: Record<AgentKind, string>
 }
@@ -65,21 +90,24 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
       sessions: '當前 Worktree 對話',
       day: '今日統計',
       week: '本週統計',
-      month: '本月統計'
+      month: '本月統計',
+      quotas: '額度監控'
     },
     navShort: {
       live: '即時',
       sessions: '對話',
       day: '今日',
       week: '本週',
-      month: '本月'
+      month: '本月',
+      quotas: '額度'
     },
     tabSubtitles: {
       live: '即時 Agent 狀態、模型與 I/O 脈衝速率',
       sessions: '依左側聚焦專案與 Worktree 由新到舊排列',
       day: '今日 24 小時累計 Token 與費用',
       week: '近 7 天累計趨勢與 Agent 佔比',
-      month: '近 30 天累計趨勢與 Agent 佔比'
+      month: '近 30 天累計趨勢與 Agent 佔比',
+      quotas: 'Codex、Antigravity 與 Claude 的 5 小時與每週額度'
     },
     scopeAll: '全機',
     scopeWorktree: '當前 Worktree',
@@ -127,6 +155,31 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     hoursAgo: (h) => `${h} 小時前`,
     daysAgo: (d) => `${d} 天前`,
     activeBadge: '進行中',
+    quota5hLabel: '5 小時視窗',
+    quotaWeeklyLabel: '每週 (7d)',
+    quotaUsedLabel: '已用',
+    quotaResetsIn: (countdown) => `${countdown}後重置`,
+    quotaResetSoon: '即將重置',
+    quotaNotApplicable: '不適用',
+    quotaWeeklyOnlyHint: '僅含每週額度 · 無 5 小時上限',
+    quotaResetCredits: (count) => `${count} 次重置額度`,
+    quotaNextExpiry: (when) => `到期 ${when}`,
+    quotaLocalUsage5h: '本機 5h',
+    quotaLocalUsage7d: '本機 7d',
+    quotaTurnsShort: (count) => `${count} 輪`,
+    quotaRateLimitsShort: (count) => `${count} × 429`,
+    quotaUnavailableLabel: '官方方案額度不可用',
+    quotaErrorLabel: '額度讀取失敗',
+    quotaLoadingLabel: '正在取得即時額度…',
+    quotaNoDataLabel: '尚未載入額度資料',
+    quotaSourceLive: '即時額度',
+    quotaSourceCache: '快取額度',
+    quotaSourceLoading: '同步額度中…',
+    quotaSourceError: '額度同步錯誤',
+    quotaRefreshAction: '重新整理',
+    quotaOtherAccounts: '帳號列表',
+    quotaActiveAccountBadge: '使用中',
+    quotaStatusOk: '正常',
     states: {
       working: '執行中',
       waiting: '待命中',
@@ -147,21 +200,24 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
       sessions: '当前 Worktree 对话',
       day: '今日统计',
       week: '本周统计',
-      month: '本月统计'
+      month: '本月统计',
+      quotas: '额度监控'
     },
     navShort: {
       live: '实时',
       sessions: '对话',
       day: '今日',
       week: '本周',
-      month: '本月'
+      month: '本月',
+      quotas: '额度'
     },
     tabSubtitles: {
       live: '实时 Agent 状态、模型与 I/O 脉冲速率',
       sessions: '按左侧聚焦项目与 Worktree 从新到旧排列',
       day: '今日 24 小时累计 Token 与费用',
       week: '近 7 天累计趋势与 Agent 占比',
-      month: '近 30 天累计趋势与 Agent 占比'
+      month: '近 30 天累计趋势与 Agent 占比',
+      quotas: 'Codex、Antigravity 与 Claude 的 5 小时及每周额度'
     },
     scopeAll: '全机',
     scopeWorktree: '当前 Worktree',
@@ -209,6 +265,31 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     hoursAgo: (h) => `${h} 小时前`,
     daysAgo: (d) => `${d} 天前`,
     activeBadge: '进行中',
+    quota5hLabel: '5 小时窗口',
+    quotaWeeklyLabel: '每周 (7d)',
+    quotaUsedLabel: '已用',
+    quotaResetsIn: (countdown) => `${countdown}后重置`,
+    quotaResetSoon: '即将重置',
+    quotaNotApplicable: '不适用',
+    quotaWeeklyOnlyHint: '仅含每周额度 · 无 5 小时上限',
+    quotaResetCredits: (count) => `${count} 次重置额度`,
+    quotaNextExpiry: (when) => `到期 ${when}`,
+    quotaLocalUsage5h: '本地 5h',
+    quotaLocalUsage7d: '本地 7d',
+    quotaTurnsShort: (count) => `${count} 轮`,
+    quotaRateLimitsShort: (count) => `${count} × 429`,
+    quotaUnavailableLabel: '官方方案额度不可用',
+    quotaErrorLabel: '额度读取失败',
+    quotaLoadingLabel: '正在获取实时额度…',
+    quotaNoDataLabel: '尚未加载额度数据',
+    quotaSourceLive: '实时额度',
+    quotaSourceCache: '缓存额度',
+    quotaSourceLoading: '同步额度中…',
+    quotaSourceError: '额度同步错误',
+    quotaRefreshAction: '刷新',
+    quotaOtherAccounts: '账号列表',
+    quotaActiveAccountBadge: '使用中',
+    quotaStatusOk: '正常',
     states: {
       working: '运行中',
       waiting: '待命中',
@@ -229,21 +310,24 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
       sessions: 'Worktree Conversations',
       day: 'Today',
       week: 'This Week',
-      month: 'This Month'
+      month: 'This Month',
+      quotas: 'Quotas & Limits'
     },
     navShort: {
       live: 'Live',
       sessions: 'Sessions',
       day: 'Today',
       week: 'Week',
-      month: 'Month'
+      month: 'Month',
+      quotas: 'Quotas'
     },
     tabSubtitles: {
       live: 'Active agents, provider models & live I/O telemetry',
       sessions: 'Focused project & worktree sessions sorted newest first',
       day: '24-hour token consumption & estimated spend',
       week: 'Last 7 days trend & agent breakdown',
-      month: 'Last 30 days trend & agent breakdown'
+      month: 'Last 30 days trend & agent breakdown',
+      quotas: '5-hour & weekly plan limits across Codex, Antigravity & Claude'
     },
     scopeAll: 'All Machine',
     scopeWorktree: 'Worktree',
@@ -291,6 +375,31 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     hoursAgo: (h) => `${h}h ago`,
     daysAgo: (d) => `${d}d ago`,
     activeBadge: 'active',
+    quota5hLabel: '5h Window',
+    quotaWeeklyLabel: 'Weekly (7d)',
+    quotaUsedLabel: 'used',
+    quotaResetsIn: (countdown) => `Resets in ${countdown}`,
+    quotaResetSoon: 'Resetting soon',
+    quotaNotApplicable: 'N/A',
+    quotaWeeklyOnlyHint: 'Weekly-only plan · No 5h limit',
+    quotaResetCredits: (count) => `${count} reset credits`,
+    quotaNextExpiry: (when) => `exp ${when}`,
+    quotaLocalUsage5h: 'Local 5h',
+    quotaLocalUsage7d: 'Local 7d',
+    quotaTurnsShort: (count) => `${count} turns`,
+    quotaRateLimitsShort: (count) => `${count} × 429`,
+    quotaUnavailableLabel: 'Official quota unavailable',
+    quotaErrorLabel: 'Quota check failed',
+    quotaLoadingLabel: 'Checking provider quotas…',
+    quotaNoDataLabel: 'Quota telemetry not loaded yet',
+    quotaSourceLive: 'Live quotas',
+    quotaSourceCache: 'Cached quotas',
+    quotaSourceLoading: 'Syncing quotas…',
+    quotaSourceError: 'Quota sync error',
+    quotaRefreshAction: 'Refresh',
+    quotaOtherAccounts: 'Accounts',
+    quotaActiveAccountBadge: 'active',
+    quotaStatusOk: 'OK',
     states: {
       working: 'working',
       waiting: 'waiting',
@@ -311,21 +420,24 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
       sessions: '会話セッション',
       day: '今日',
       week: '週間',
-      month: '月間'
+      month: '月間',
+      quotas: 'クォータ'
     },
     navShort: {
       live: 'ライブ',
       sessions: '会話',
       day: '今日',
       week: '週間',
-      month: '月間'
+      month: '月間',
+      quotas: '枠'
     },
     tabSubtitles: {
       live: '実行中エージェント・モデル・I/O ストリーム',
       sessions: '選択中のプロジェクト＆ワークツリーの会話（新しい順）',
       day: '過去24時間のトークン消費と推定コスト',
       week: '過去7日間の推移とエージェント別内訳',
-      month: '過去30日間の推移とエージェント別内訳'
+      month: '過去30日間の推移とエージェント別内訳',
+      quotas: 'Codex・Antigravity・Claude の5時間／週間利用枠'
     },
     scopeAll: 'マシン全体',
     scopeWorktree: 'ワークツリー',
@@ -373,6 +485,31 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     hoursAgo: (h) => `${h}時間前`,
     daysAgo: (d) => `${d}日前`,
     activeBadge: '実行中',
+    quota5hLabel: '5時間枠',
+    quotaWeeklyLabel: '週間 (7d)',
+    quotaUsedLabel: '使用済',
+    quotaResetsIn: (countdown) => `あと ${countdown}`,
+    quotaResetSoon: 'まもなくリセット',
+    quotaNotApplicable: '対象外',
+    quotaWeeklyOnlyHint: '週間プランのみ · 5時間枠なし',
+    quotaResetCredits: (count) => `リセット枠 ${count}`,
+    quotaNextExpiry: (when) => `期限 ${when}`,
+    quotaLocalUsage5h: 'ローカル 5h',
+    quotaLocalUsage7d: 'ローカル 7d',
+    quotaTurnsShort: (count) => `${count} 回`,
+    quotaRateLimitsShort: (count) => `${count} × 429`,
+    quotaUnavailableLabel: '公式クォータ利用不可',
+    quotaErrorLabel: 'クォータ取得エラー',
+    quotaLoadingLabel: 'クォータを取得中…',
+    quotaNoDataLabel: 'クォータ未読み込み',
+    quotaSourceLive: 'ライブ枠',
+    quotaSourceCache: 'キャッシュ枠',
+    quotaSourceLoading: '同期中…',
+    quotaSourceError: '同期エラー',
+    quotaRefreshAction: '更新',
+    quotaOtherAccounts: 'アカウント',
+    quotaActiveAccountBadge: '有効',
+    quotaStatusOk: '正常',
     states: {
       working: '実行中',
       waiting: '待機中',
@@ -393,21 +530,24 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
       sessions: '워크트리 대화',
       day: '오늘',
       week: '주간',
-      month: '월간'
+      month: '월간',
+      quotas: '할당량'
     },
     navShort: {
       live: '실시간',
       sessions: '대화',
       day: '오늘',
       week: '주간',
-      month: '월간'
+      month: '월간',
+      quotas: '한도'
     },
     tabSubtitles: {
       live: '실행 중인 에이전트, 모델 및 실시간 I/O 파형',
       sessions: '선택된 프로젝트 및 워크트리 대화 목록 (최신순)',
       day: '오늘 24시간 토큰 사용량 및 예상 비용',
       week: '최근 7일 추이 및 에이전트별 비중',
-      month: '최근 30일 추이 및 에이전트별 비중'
+      month: '최근 30일 추이 및 에이전트별 비중',
+      quotas: 'Codex, Antigravity, Claude의 5시간 및 주간 한도'
     },
     scopeAll: '전체 기기',
     scopeWorktree: '워크트리',
@@ -455,6 +595,31 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     hoursAgo: (h) => `${h}시간 전`,
     daysAgo: (d) => `${d}일 전`,
     activeBadge: '활성',
+    quota5hLabel: '5시간 창',
+    quotaWeeklyLabel: '주간 (7d)',
+    quotaUsedLabel: '사용',
+    quotaResetsIn: (countdown) => `${countdown} 후 초기화`,
+    quotaResetSoon: '곧 초기화',
+    quotaNotApplicable: '해당 없음',
+    quotaWeeklyOnlyHint: '주간 전용 플랜 · 5시간 한도 없음',
+    quotaResetCredits: (count) => `리셋 크레딧 ${count}`,
+    quotaNextExpiry: (when) => `만료 ${when}`,
+    quotaLocalUsage5h: '로컬 5h',
+    quotaLocalUsage7d: '로컬 7d',
+    quotaTurnsShort: (count) => `${count} 턴`,
+    quotaRateLimitsShort: (count) => `${count} × 429`,
+    quotaUnavailableLabel: '공식 할당량 사용 불가',
+    quotaErrorLabel: '할당량 조회 오류',
+    quotaLoadingLabel: '할당량 확인 중…',
+    quotaNoDataLabel: '할당량 데이터 없음',
+    quotaSourceLive: '실시간 한도',
+    quotaSourceCache: '캐시된 한도',
+    quotaSourceLoading: '동기화 중…',
+    quotaSourceError: '동기화 오류',
+    quotaRefreshAction: '새로고침',
+    quotaOtherAccounts: '계정 목록',
+    quotaActiveAccountBadge: '활성',
+    quotaStatusOk: '정상',
     states: {
       working: '작업 중',
       waiting: '대기 중',
@@ -537,4 +702,27 @@ export function formatRelativeTime(tsMs: number, nowMs: number, msg: UiMessages)
   if (hours < 24) return msg.hoursAgo(hours)
   const days = Math.floor(hours / 24)
   return msg.daysAgo(days)
+}
+
+export function formatCountdown(
+  targetMs: number | null | undefined,
+  nowMs: number,
+  msg: UiMessages
+): string {
+  if (!targetMs || !Number.isFinite(targetMs)) return ''
+  const diffMs = targetMs - nowMs
+  if (diffMs <= 60_000) return msg.quotaResetSoon
+  const totalMins = Math.floor(diffMs / 60_000)
+  const days = Math.floor(totalMins / (60 * 24))
+  const hours = Math.floor((totalMins % (60 * 24)) / 60)
+  const mins = totalMins % 60
+  let span = ''
+  if (days > 0) {
+    span = hours > 0 ? `${days}d ${hours}h` : `${days}d`
+  } else if (hours > 0) {
+    span = mins > 0 ? `${hours}h ${mins}m` : `${hours}h`
+  } else {
+    span = `${mins}m`
+  }
+  return msg.quotaResetsIn(span)
 }
