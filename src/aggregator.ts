@@ -977,7 +977,13 @@ export function resolveSessionRunState(
       }
       return st.lastEventState === 'waiting' ? 'waiting' : 'working'
     }
-    if (jMeta.lastTurnState === 'settled' || st.lastEventState === 'done') {
+    if (st.lastEventState === 'done') {
+      return 'done'
+    }
+    const journalRefMs =
+      (jMeta.turnUpdatedAt ?? 0) > 0 ? (jMeta.turnUpdatedAt ?? 0) : (jMeta.updatedAt ?? 0)
+    const hasNewerTranscriptActivity = journalRefMs > 0 && lastTouchMs > journalRefMs + 2_000
+    if (jMeta.lastTurnState === 'settled' && !hasNewerTranscriptActivity) {
       return 'done'
     }
     if (st.lastEventState === 'waiting' && now - lastTouchMs <= 30 * 60_000) {

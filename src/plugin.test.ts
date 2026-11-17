@@ -8,7 +8,8 @@ import {
   buildDashboardSnapshot,
   compute60sIoSeries,
   isSameOrChildWorktreePath,
-  pollSingleLiveAgent
+  pollSingleLiveAgent,
+  resolveSessionRunState
 } from './aggregator'
 import {
   cleanConversationTitle,
@@ -2912,5 +2913,60 @@ describe('Terminal Tab & Handoff Title Synchronization Regressions', () => {
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true })
     }
+  })
+
+  test('keeps session working when transcript has fresh working steps newer than stale journal settled state', () => {
+    const now = Date.now()
+    const st = createEmptySessionState('antigravity', 'agy-resumed-1', '/tmp/qbibotlive/optimization/transcript.jsonl')
+    st.projectName = 'qbibotlive'
+    st.workspacePath = '/tmp/qbibotlive/optimization'
+    st.title = '#优化界面流程'
+    st.lastEventState = 'working'
+    st.updatedAtMs = now - 3_000
+    st.lastMtimeMs = now - 3_000
+    st.turnsByKey.set('t1', {
+      turnKey: 't1',
+      model: 'gemini-4-carbon',
+      input: 1000,
+      output: 200,
+      cacheRead: 5000,
+      cacheWrite: 0,
+      total: 6200,
+      durationMs: 4000,
+      timestampMs: now - 3_000,
+      outputForTps: 200,
+      durationMsForTps: 4000
+    })
+
+    const staleSettledJournal: import('./journal').JournalSessionMeta = {
+      orcaSessionId: 'orca-agy-1',
+      nativeId: 'agy-resumed-1',
+      provider: 'antigravity',
+      title: '#优化界面流程',
+      workspacePath: '/tmp/qbibotlive/optimization',
+      updatedAt: now - 3_600_000,
+      turnUpdatedAt: now - 3_600_000,
+      isLiveLease: false,
+      isTurnOpen: false,
+      lastTurnState: 'settled'
+    }
+
+    assert.equal(
+      resolveSessionRunState(st, staleSettledJournal, null, now),
+      'working',
+      'Fresh transcript working steps newer than journal settled timestamp must stay working'
+    )
+
+    // When transcript is NOT newer than journal settled timestamp, journal settled still wins
+    const freshSettledJournal: import('./journal').JournalSessionMeta = {
+      ...staleSettledJournal,
+      updatedAt: now - 1_000,
+      turnUpdatedAt: now - 1_000
+    }
+    assert.equal(
+      resolveSessionRunState(st, freshSettledJournal, null, now),
+      'done',
+      'Authoritative journal settled timestamp newer than transcript must remain done'
+    )
   })
 })
