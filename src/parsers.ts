@@ -26,6 +26,12 @@ export interface ParsedTurnUsage {
 
 export type TranscriptEventState = 'working' | 'waiting' | 'done'
 
+export interface SpawnedSubagentMeta {
+  name?: string
+  role?: string
+  description?: string
+}
+
 export interface SessionTranscriptState {
   sessionId: string
   agent: AgentKind
@@ -41,6 +47,11 @@ export interface SessionTranscriptState {
   isSubagent: boolean
   parentSessionId: string | null
   parentMessageUuid: string | null
+  subagentId: string | null
+  subagentName: string | null
+  subagentRole: string | null
+  /** Parent Claude session map: spawned child `agentId` -> `{ name?, role?, description? }` from Task/Agent calls */
+  spawnedSubagentsByAgentId?: Record<string, SpawnedSubagentMeta>
   messageUuids: string[]
   reasoningLevels: string[]
   latestModel: string | null
@@ -55,6 +66,8 @@ export interface SessionTranscriptState {
   lastCodexCumulativeTotal: number | null
   agStepCreatedMs: Map<number, number>
   maxAgStepIndex: number
+  claudePendingSubagentCalls?: Map<string, SpawnedSubagentMeta>
+  claudePendingSubagentByAssistantUuid?: Map<string, SpawnedSubagentMeta[]>
 }
 
 export function createEmptySessionState(
@@ -77,6 +90,9 @@ export function createEmptySessionState(
     isSubagent: false,
     parentSessionId: null,
     parentMessageUuid: null,
+    subagentId: null,
+    subagentName: null,
+    subagentRole: null,
     messageUuids: [],
     reasoningLevels: [],
     latestModel: null,
@@ -294,6 +310,139 @@ function recordReasoningLevelFromObject(state: SessionTranscriptState, obj: Reco
   )
 }
 
+function cleanNonEmptyString(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  return trimmed ? trimmed : undefined
+}
+
+function setBoundedMapEntry<K, V>(map: Map<K, V>, key: K, value: V, maxEntries = 512): void {
+  if (!map.has(key) && map.size >= maxEntries) {
+    const oldest = map.keys().next().value
+    if (oldest !== undefined) map.delete(oldest)
+  }
+  map.set(key, value)
+}
+
+function deriveCodexSubagentRole(rawRole: unknown, rawPath: unknown): string | null {
+  const role = cleanNonEmptyString(rawRole)
+  if (role && role.toLowerCase() !== 'default') {
+    return role
+  }
+  const rawPathStr = cleanNonEmptyString(rawPath)
+  if (rawPathStr) {
+    const normalized = rawPathStr.replace(/\\/g, '/').replace(/\/+$/, '')
+    if (normalized && normalized !== '/root' && normalized !== 'root') {
+      const base = path.posix.basename(normalized).trim()
+      if (base && base !== '.' && base !== '..' && base !== '/') {
+        return base
+      }
+    }
+  }
+  return null
+}
+
+function recordClaudeSpawnedToolUses(
+  state: SessionTranscriptState,
+  assistantUuid: string,
+  content: unknown
+): void {
+  if (!Array.isArray(content)) return
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const b = block as { type?: unknown; id?: unknown; name?: unknown; input?: unknown }
+    if (b.type !== 'tool_use') continue
+    const toolName = String(b.name || '')
+    if (toolName !== 'Task' && toolName !== 'Agent') continue
+
+    const input = b.input && typeof b.input === 'object'
+      ? (b.input as Record<string, unknown>)
+      : {}
+    const meta: SpawnedSubagentMeta = {}
+    const name = cleanNonEmptyString(input.name)
+    const role = cleanNonEmptyString(input.subagent_type ?? input.subagentType)
+    const description = cleanNonEmptyString(input.description)
+    if (name) meta.name = name
+    if (role) meta.role = role
+    if (description) meta.description = description
+
+    const toolUseId = cleanNonEmptyString(b.id)
+    if (toolUseId) {
+      state.claudePendingSubagentCalls ??= new Map()
+      setBoundedMapEntry(state.claudePendingSubagentCalls, toolUseId, meta)
+    }
+    if (assistantUuid) {
+      state.claudePendingSubagentByAssistantUuid ??= new Map()
+      const list = state.claudePendingSubagentByAssistantUuid.get(assistantUuid) ?? []
+      list.push(meta)
+      setBoundedMapEntry(state.claudePendingSubagentByAssistantUuid, assistantUuid, list)
+    }
+  }
+}
+
+function recordClaudeToolUseResult(
+  state: SessionTranscriptState,
+  obj: Record<string, unknown>,
+  msgContent: unknown
+): void {
+  const rawTur = obj.toolUseResult
+  if (!rawTur || typeof rawTur !== 'object' || Array.isArray(rawTur)) return
+  const tur = rawTur as Record<string, unknown>
+  const agentId = cleanNonEmptyString(tur.agentId ?? tur.agent_id)
+  if (!agentId) return
+
+  let toolUseId: string | undefined
+  if (Array.isArray(msgContent)) {
+    for (const block of msgContent) {
+      if (!block || typeof block !== 'object') continue
+      const b = block as { type?: unknown; tool_use_id?: unknown }
+      const candidate = cleanNonEmptyString(b.tool_use_id)
+      if (!candidate) continue
+      if (b.type === 'tool_result' && state.claudePendingSubagentCalls?.has(candidate)) {
+        toolUseId = candidate
+        break
+      }
+      if (!toolUseId) toolUseId = candidate
+    }
+  }
+  if (!toolUseId) {
+    toolUseId = cleanNonEmptyString(
+      obj.toolUseID ?? obj.tool_use_id ?? tur.toolUseId ?? tur.tool_use_id
+    )
+  }
+
+  let callMeta: SpawnedSubagentMeta | undefined
+  if (toolUseId && state.claudePendingSubagentCalls?.has(toolUseId)) {
+    callMeta = state.claudePendingSubagentCalls.get(toolUseId)
+    state.claudePendingSubagentCalls.delete(toolUseId)
+  } else {
+    const sourceAssistantUuid = cleanNonEmptyString(obj.sourceToolAssistantUUID)
+    const pendingList = sourceAssistantUuid
+      ? state.claudePendingSubagentByAssistantUuid?.get(sourceAssistantUuid)
+      : undefined
+    if (pendingList && pendingList.length > 0) {
+      callMeta = pendingList.shift()
+      if (pendingList.length === 0 && sourceAssistantUuid) {
+        state.claudePendingSubagentByAssistantUuid?.delete(sourceAssistantUuid)
+      }
+    }
+  }
+
+  const name = callMeta?.name ?? cleanNonEmptyString(tur.name)
+  const role =
+    callMeta?.role ?? cleanNonEmptyString(tur.subagent_type ?? tur.subagentType ?? tur.agentType)
+  const description = callMeta?.description ?? cleanNonEmptyString(tur.description)
+
+  state.spawnedSubagentsByAgentId ??= {}
+  const merged: SpawnedSubagentMeta = {
+    ...(state.spawnedSubagentsByAgentId[agentId] ?? {})
+  }
+  if (name) merged.name = name
+  if (role) merged.role = role
+  if (description) merged.description = description
+  state.spawnedSubagentsByAgentId[agentId] = merged
+}
+
 /**
  * Parses lines from a Claude Code `~/.claude/projects/.../*.jsonl` session transcript.
  */
@@ -317,6 +466,16 @@ export function applyClaudeLines(state: SessionTranscriptState, lines: string[])
       state.isSubagent = true
       const parentUuid = typeof obj.parentUuid === 'string' ? obj.parentUuid.trim() : ''
       if (parentUuid) state.parentMessageUuid = parentUuid
+    }
+    const lineAgentId = cleanNonEmptyString(obj.agentId)
+    if (lineAgentId && !state.subagentId) {
+      state.subagentId = lineAgentId
+    }
+    if (state.isSubagent && !state.parentSessionId) {
+      const lineSessionId = cleanNonEmptyString(obj.sessionId)
+      if (lineSessionId && lineSessionId !== state.sessionId) {
+        state.parentSessionId = lineSessionId
+      }
     }
 
     if (typeof obj.cwd === 'string' && obj.cwd.trim()) {
@@ -349,6 +508,7 @@ export function applyClaudeLines(state: SessionTranscriptState, lines: string[])
         state.lastInferenceStartMs = tsMs
       }
       const msg = obj.message as { content?: unknown } | undefined
+      recordClaudeToolUseResult(state, obj, msg?.content)
       const rawText = extractMessageText(msg?.content)
       if (state.turnsByKey.size === 0 && isInternalHelperPromptText(rawText)) {
         state.isInternalHelper = true
@@ -375,6 +535,7 @@ export function applyClaudeLines(state: SessionTranscriptState, lines: string[])
       if (model === '<synthetic>') continue
       if (model) state.latestModel = model
       recordReasoningLevel(state, model?.match(/\(([^)]+)\)\s*$/)?.[1])
+      recordClaudeSpawnedToolUses(state, uuid, msg.content)
 
       const stopReason = typeof msg.stop_reason === 'string' ? msg.stop_reason : null
       if (stopReason === 'end_turn' || stopReason === 'stop_sequence' || stopReason === 'max_tokens') {
@@ -484,6 +645,14 @@ export function applyCodexLines(state: SessionTranscriptState, lines: string[]):
           : source && typeof source === 'object' && typeof source.kind === 'string'
             ? source.kind
             : ''
+      const subagent = source && typeof source === 'object' ? source.subagent : null
+      const subagentRecord =
+        subagent && typeof subagent === 'object' ? (subagent as Record<string, unknown>) : null
+      const threadSpawn =
+        subagentRecord?.thread_spawn && typeof subagentRecord.thread_spawn === 'object'
+          ? (subagentRecord.thread_spawn as Record<string, unknown>)
+          : null
+
       if (sourceKind === 'memory_consolidation' || sourceKind === 'guardian_review') {
         state.isInternalHelper = true
       } else if (
@@ -491,13 +660,7 @@ export function applyCodexLines(state: SessionTranscriptState, lines: string[]):
         (source && typeof source === 'object' && 'subagent' in source && Boolean(source.subagent))
       ) {
         state.isSubagent = true
-        const subagent = source && typeof source === 'object' ? source.subagent : null
-        if (subagent && typeof subagent === 'object') {
-          const subagentRecord = subagent as Record<string, unknown>
-          const threadSpawn =
-            subagentRecord.thread_spawn && typeof subagentRecord.thread_spawn === 'object'
-              ? (subagentRecord.thread_spawn as Record<string, unknown>)
-              : null
+        if (subagentRecord) {
           const parentId =
             subagentRecord.parent_thread_id ??
             subagentRecord.parent_id ??
@@ -511,6 +674,25 @@ export function applyCodexLines(state: SessionTranscriptState, lines: string[]):
             state.parentSessionId = parentId.trim()
           }
         }
+      }
+      if (!state.isInternalHelper) {
+        const subagentName =
+          cleanNonEmptyString(payload.agent_nickname) ??
+          cleanNonEmptyString(threadSpawn?.agent_nickname) ??
+          cleanNonEmptyString(subagentRecord?.agent_nickname)
+        if (subagentName) state.subagentName = subagentName
+
+        const rawRole = [
+          cleanNonEmptyString(payload.agent_role),
+          cleanNonEmptyString(threadSpawn?.agent_role),
+          cleanNonEmptyString(subagentRecord?.agent_role)
+        ].find((r) => r && r.toLowerCase() !== 'default')
+        const rawPath =
+          cleanNonEmptyString(payload.agent_path) ??
+          cleanNonEmptyString(threadSpawn?.agent_path) ??
+          cleanNonEmptyString(subagentRecord?.agent_path)
+        const subagentRole = deriveCodexSubagentRole(rawRole, rawPath)
+        if (subagentRole) state.subagentRole = subagentRole
       }
       continue
     }
