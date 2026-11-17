@@ -62,6 +62,7 @@ export interface AntigravityConversationSummaryMeta {
   conversationId: string
   parentConversationId: string | null
   title: string | null
+  agentName: string | null
   workspacePath: string | null
   workspacePaths: string[]
   isSubagent: boolean
@@ -370,6 +371,19 @@ export function cleanConversationTitle(raw: unknown): string | null {
   if (typeof raw !== 'string') return null
   const cleaned = raw.replace(/\s+/g, ' ').trim()
   return cleaned.length > 0 ? cleaned.slice(0, 120) : null
+}
+
+const RAW_UUID_PATTERN =
+  /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$|^[0-9a-f]{32}$/i
+
+/**
+ * Normalizes an Antigravity subagent `agent_name`, discarding empty strings or raw UUID-like values.
+ */
+export function cleanAgentName(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const cleaned = raw.replace(/\s+/g, ' ').trim()
+  if (!cleaned || RAW_UUID_PATTERN.test(cleaned)) return null
+  return cleaned.slice(0, 120)
 }
 
 function isGenericChatTabLabel(label: string | null): boolean {
@@ -753,6 +767,7 @@ function readAntigravityMetadata(
         const wantedCols = [
           'conversation_id',
           'title',
+          'agent_name',
           'workspace_uris',
           'last_modified_time',
           'updated_at',
@@ -769,6 +784,7 @@ function readAntigravityMetadata(
           if (!convId) continue
 
           const cleanTitle = cleanConversationTitle(r.title)
+          const cleanedAgentName = cleanAgentName(r.agent_name)
           const decoded = decodeWorkspaceUris(r.workspace_uris, preferredNormPaths)
           const rowUpdatedMs = parseJournalTimestampMs(r.last_modified_time ?? r.updated_at)
           const parentCol =
@@ -783,6 +799,7 @@ function readAntigravityMetadata(
               conversationId: convId,
               parentConversationId,
               title: cleanTitle,
+              agentName: cleanedAgentName,
               workspacePath: decoded.primary,
               workspacePaths: decoded.all,
               isSubagent: rowIsSubagent,
@@ -820,6 +837,9 @@ function readAntigravityMetadata(
                 ? parentConversationId || existing.parentConversationId
                 : existing.parentConversationId || parentConversationId,
               title: isNewer ? cleanTitle || existing.title : existing.title || cleanTitle,
+              agentName: isNewer
+                ? cleanedAgentName || existing.agentName
+                : existing.agentName || cleanedAgentName,
               workspacePath: mergedPrimary,
               workspacePaths: mergedPaths,
               isSubagent: Boolean(existing.isSubagent || rowIsSubagent),
