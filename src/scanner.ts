@@ -10,7 +10,8 @@ import {
   createEmptySessionState,
   parseGeminiSessionJson,
   readCompleteJsonlChunk,
-  type SessionTranscriptState
+  type SessionTranscriptState,
+  type SpawnedSubagentMeta
 } from './parsers'
 import type { AgentKind } from './protocol'
 
@@ -44,6 +45,10 @@ export interface CachedFileSummary {
   isSubagent?: boolean
   parentSessionId?: string | null
   parentMessageUuid?: string | null
+  subagentId?: string | null
+  subagentName?: string | null
+  subagentRole?: string | null
+  spawnedSubagentsByAgentId?: Record<string, SpawnedSubagentMeta>
   messageUuids?: string[]
   reasoningLevels?: string[]
   latestModel: string | null
@@ -139,6 +144,91 @@ function walkMatchingFiles(
         }
       }
     }
+  }
+}
+
+function applyClaudeSubagentFileHints(state: SessionTranscriptState): void {
+  const normalized = state.filePath.replace(/\\/g, '/')
+  if (!normalized.includes('/subagents/')) return
+
+  state.isSubagent = true
+  if (state.agent !== 'claude') return
+
+  const subMatch = normalized.match(/(?:^|\/)(?:([^/]+)\/)?subagents\/(agent-([^/]+))\.jsonl$/)
+  if (!subMatch) return
+
+  const parentDir = subMatch[1]
+  const canonicalSessionId = subMatch[2]
+  const agentId = subMatch[3]
+
+  if (!state.sessionId && canonicalSessionId) {
+    state.sessionId = canonicalSessionId
+  }
+  if (agentId && !state.subagentId) {
+    state.subagentId = agentId
+  }
+  if (parentDir && parentDir !== 'projects' && !state.parentSessionId) {
+    state.parentSessionId = parentDir
+  }
+
+  if (state.subagentRole && state.subagentName) return
+
+  const metaPath = state.filePath.replace(/\.jsonl$/i, '.meta.json')
+  try {
+    const raw = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as Record<string, unknown> | null
+    if (!raw || typeof raw !== 'object') return
+    const rawRole = raw.agentType ?? raw.subagent_type ?? raw.subagentType
+    if (!state.subagentRole && typeof rawRole === 'string' && rawRole.trim()) {
+      state.subagentRole = rawRole.trim()
+    }
+    const rawName = raw.name ?? raw.agentName
+    if (!state.subagentName && typeof rawName === 'string' && rawName.trim()) {
+      state.subagentName = rawName.trim()
+    }
+  } catch {
+    // Sibling .meta.json is optional
+  }
+}
+
+function ingestJsonlTranscript(
+  statesByFile: Map<string, SessionTranscriptState>,
+  disc: DiscoveredFile,
+  existing: SessionTranscriptState | undefined
+): { state: SessionTranscriptState; chunkMtimeMs: number } | null {
+  let state = existing
+  if (!state || disc.sizeBytes < state.offsetBytes) {
+    state = createEmptySessionState(disc.sessionIdHint, disc.agent, disc.filePath)
+    applyClaudeSubagentFileHints(state)
+    statesByFile.set(disc.filePath, state)
+  } else if (state.agent === 'claude' && state.isSubagent && !state.subagentRole) {
+    applyClaudeSubagentFileHints(state)
+  }
+
+  try {
+    const chunk = readCompleteJsonlChunk(disc.filePath, state.offsetBytes)
+    state.lastMtimeMs = chunk.mtimeMs
+    if (chunk.lines.length > 0) {
+      switch (disc.agent) {
+        case 'claude':
+          applyClaudeLines(state, chunk.lines)
+          break
+        case 'codex':
+          applyCodexLines(state, chunk.lines)
+          break
+        case 'antigravity':
+        case 'gemini':
+          applyAntigravityLines(state, chunk.lines)
+          break
+      }
+    }
+    state.offsetBytes = chunk.nextOffset
+    state.lastSizeBytes = chunk.fileSize
+    if (state.updatedAtMs === 0) state.updatedAtMs = chunk.mtimeMs
+    if (state.createdAtMs === 0) state.createdAtMs = chunk.mtimeMs
+    return { state, chunkMtimeMs: chunk.mtimeMs }
+  } catch {
+    // Ignore deleted or transient unreadable file mid-scan
+    return null
   }
 }
 
@@ -282,6 +372,12 @@ export class TranscriptScanner {
       st.isSubagent = Boolean(item.isSubagent)
       st.parentSessionId = item.parentSessionId ?? null
       st.parentMessageUuid = item.parentMessageUuid ?? null
+      st.subagentId = typeof item.subagentId === 'string' && item.subagentId.trim() ? item.subagentId.trim() : null
+      st.subagentName = typeof item.subagentName === 'string' && item.subagentName.trim() ? item.subagentName.trim() : null
+      st.subagentRole = typeof item.subagentRole === 'string' && item.subagentRole.trim() ? item.subagentRole.trim() : null
+      if (item.spawnedSubagentsByAgentId && typeof item.spawnedSubagentsByAgentId === 'object') {
+        st.spawnedSubagentsByAgentId = item.spawnedSubagentsByAgentId
+      }
       st.messageUuids = Array.isArray(item.messageUuids)
         ? item.messageUuids.filter((uuid): uuid is string => typeof uuid === 'string')
         : []
@@ -413,6 +509,12 @@ export class TranscriptScanner {
         isSubagent: st.isSubagent,
         parentSessionId: st.parentSessionId,
         parentMessageUuid: st.parentMessageUuid,
+        subagentId: st.subagentId,
+        subagentName: st.subagentName,
+        subagentRole: st.subagentRole,
+        ...(st.spawnedSubagentsByAgentId && Object.keys(st.spawnedSubagentsByAgentId).length > 0
+          ? { spawnedSubagentsByAgentId: st.spawnedSubagentsByAgentId }
+          : {}),
         messageUuids: st.messageUuids,
         reasoningLevels: st.reasoningLevels,
         latestModel: st.latestModel,
@@ -586,39 +688,7 @@ export class TranscriptScanner {
         continue
       }
 
-      let state = existing
-      if (!state || disc.sizeBytes < state.offsetBytes) {
-        state = createEmptySessionState(disc.sessionIdHint, disc.agent, disc.filePath)
-        if (disc.filePath.includes(`${path.sep}subagents${path.sep}`)) {
-          state.isSubagent = true
-        }
-        this.statesByFile.set(disc.filePath, state)
-      }
-
-      try {
-        const chunk = readCompleteJsonlChunk(disc.filePath, state.offsetBytes)
-        state.lastMtimeMs = chunk.mtimeMs
-        if (chunk.lines.length > 0) {
-          switch (disc.agent) {
-            case 'claude':
-              applyClaudeLines(state, chunk.lines)
-              break
-            case 'codex':
-              applyCodexLines(state, chunk.lines)
-              break
-            case 'antigravity':
-            case 'gemini':
-              applyAntigravityLines(state, chunk.lines)
-              break
-          }
-        }
-        state.offsetBytes = chunk.nextOffset
-        state.lastSizeBytes = chunk.fileSize
-        if (state.updatedAtMs === 0) state.updatedAtMs = chunk.mtimeMs
-        if (state.createdAtMs === 0) state.createdAtMs = chunk.mtimeMs
-      } catch {
-        // Ignore transient read error
-      }
+      ingestJsonlTranscript(this.statesByFile, disc, existing)
     }
     this.applyJournalSessionHints(now)
     return this.getSessions()
@@ -673,6 +743,9 @@ export class TranscriptScanner {
         existing.offsetBytes === disc.sizeBytes &&
         Math.abs(existing.lastMtimeMs - disc.mtimeMs) < 1
       ) {
+        if (existing.agent === 'claude' && existing.isSubagent && !existing.subagentRole) {
+          applyClaudeSubagentFileHints(existing)
+        }
         continue
       }
 
@@ -693,43 +766,13 @@ export class TranscriptScanner {
         continue
       }
 
-      let state = existing
-      if (!state || disc.sizeBytes < state.offsetBytes) {
-        state = createEmptySessionState(disc.sessionIdHint, disc.agent, disc.filePath)
-        if (disc.filePath.includes(`${path.sep}subagents${path.sep}`)) {
-          state.isSubagent = true
-        }
-        this.statesByFile.set(disc.filePath, state)
-      }
-
-      try {
-        const chunk = readCompleteJsonlChunk(disc.filePath, state.offsetBytes)
-        state.lastMtimeMs = chunk.mtimeMs
-        if (chunk.lines.length > 0) {
-          switch (disc.agent) {
-            case 'claude':
-              applyClaudeLines(state, chunk.lines)
-              break
-            case 'codex':
-              applyCodexLines(state, chunk.lines)
-              break
-            case 'antigravity':
-              applyAntigravityLines(state, chunk.lines)
-              break
-            case 'gemini':
-              applyAntigravityLines(state, chunk.lines)
-              break
-          }
-        }
-        state.offsetBytes = chunk.nextOffset
-        state.lastSizeBytes = chunk.fileSize
-        if (state.updatedAtMs === 0) state.updatedAtMs = chunk.mtimeMs
-        if (state.createdAtMs === 0) state.createdAtMs = chunk.mtimeMs
-        if (chunk.mtimeMs < todayStartMs && state.turnsByKey.size > 0) {
-          this.dirtyHistoricalCache = true
-        }
-      } catch {
-        // Ignore deleted or unreadable file mid-scan
+      const ingested = ingestJsonlTranscript(this.statesByFile, disc, existing)
+      if (
+        ingested &&
+        ingested.chunkMtimeMs < todayStartMs &&
+        ingested.state.turnsByKey.size > 0
+      ) {
+        this.dirtyHistoricalCache = true
       }
     }
 
