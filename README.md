@@ -18,7 +18,7 @@ The plugin uses Orca's `trusted-worker` profile. Orca will show the requested ac
 - Session, day, week, and month token summaries, plus today's cumulative cost in the live dashboard.
 - Claude Code, Codex, Gemini CLI, and Antigravity transcript parsing with provider logos and reasoning effort badges.
 - Nested subagent cards under parent sessions with parent status elevation while child subagents are active, plus collapsible session groups.
-- Terminal tab and handoff title synchronization across CLI sessions, with click-to-focus terminal navigation.
+- Orca agent and terminal titles from the host API, with click-to-focus navigation for linked terminals.
 - Current model labels and provider-aware USD estimates.
 - 5-hour and weekly (7-day) quota gauges across Codex, Antigravity (Gemini and Claude/GPT model pools), and Claude, paired with local rolling 5h/7d token and USD usage.
 - Online pricing refresh from OpenRouter and models.dev, with offline built-in rates.
@@ -54,15 +54,28 @@ The larger listing screenshots in the manifest are captured directly from Orca a
 
 ## Data access and privacy
 
-The worker reads local files in read-only mode to calculate usage and match sessions to Orca workspaces. Depending on which agents are installed, the paths include:
+The worker reads agent-owned transcripts and model settings in read-only mode.
+Depending on which agents are installed, the paths include:
 
 - Claude Code: `~/.claude/projects/**/*.jsonl` and `~/.claude/settings.json`.
 - Codex: `~/.codex/sessions/**/*.jsonl` and `~/.codex/config.toml`.
 - Gemini CLI: `~/.gemini/tmp/**/chats/session-*.json` and `~/.gemini/settings.json`.
 - Antigravity: `~/.gemini/antigravity*/brain/**`, `<Orca data>/antigravity-chat/**`, and `<Orca data>/antigravity-accounts/*/**`.
-- Orca: `<Orca data>/agent-session-domain.db` (with `agent-session-journal.db` as a fallback), `<Orca data>/profiles/<active-profile>/profile-state.db`, and the runtime session directories under `<Orca data>/codex-runtime-home/` and `<Orca data>/codex-accounts/`.
+- Orca-managed Codex homes under `<Orca data>/codex-runtime-home/` and
+  `<Orca data>/codex-accounts/`, for their Codex transcripts and model settings.
 
-Token Pulse uses Orca's current official workspace and agent APIs for focus, status, terminal identity, and terminal focus, and invokes `orca account list --json` asynchronously (cached for 5 minutes) to read local rate-limit quota windows and pool usage across Codex, Antigravity, and Claude. Detailed per-turn usage and subagent history still come from the local agent transcripts because the current host does not expose an official session-history API.
+Token Pulse uses Orca's public workspace, agent, and terminal APIs for status,
+workspace selection, and terminal focus. The `history:read` permission lets
+`agent.listSessions` supply recent conversation titles and workspace assignments.
+Per-turn usage, TPS, costs, and subagent relationships come from the agent's own
+files. When Orca cannot supply a session match, the session uses its transcript
+metadata. Terminal focus is available when the host supplies a terminal linked
+to the session. Token Pulse reads local tab labels from the Orca CLI's public
+terminal layout and matches them by terminal handle. Custom Codex and Claude
+homes are discovered through `CODEX_HOME` and `CLAUDE_CONFIG_DIR` when those
+variables are available to the plugin worker.
+To read quota windows and pool usage, Token Pulse also runs
+`orca account list --json` with a five-minute cache.
 
 The settings files are parsed only for model and account-home metadata. Token Pulse uses local paths and `orca account list --json` output internally to display quotas and match sessions, and does not modify accounts or transmit credentials, emails, prompts, responses, transcript contents, or local paths.
 
@@ -88,7 +101,7 @@ orca plugin validate .
 orca plugin test .
 ```
 
-The plugin requires Orca `>=1.4.248`.
+The plugin requires Orca `>=1.4.259`.
 
 ## Releases
 

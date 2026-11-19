@@ -401,9 +401,7 @@ export class TranscriptScanner {
   private subagentMetaByFile = new Map<string, SubagentMetaStamp | null>()
   private journalIndex: JournalIndex = {
     byNativeId: new Map(),
-    byOrcaSessionId: new Map(),
-    accountHomes: new Map(),
-    workspaceActivityMs: new Map()
+    accountHomes: new Map()
   }
   private knownWorkspacePaths = new Set<string>()
   private lastJournalRefreshMs = 0
@@ -416,10 +414,6 @@ export class TranscriptScanner {
     this.homeDir = options.homeDir ?? (process.env.TOKEN_PULSE_HOME_DIR || os.homedir())
     this.orcaAppDirs = options.orcaAppDirs ?? defaultOrcaAppDataDirs(this.homeDir)
     this.lookbackDays = options.lookbackDays ?? 65
-  }
-
-  getOrcaAppDirs(): string[] {
-    return this.orcaAppDirs
   }
 
   setKnownWorkspacePaths(paths: Iterable<string>): void {
@@ -842,7 +836,7 @@ export class TranscriptScanner {
     const now = options.now ?? Date.now()
     const cutoffMs = now - this.lookbackDays * 86_400_000
 
-    // Refresh Orca journal DB + profile tab headers + CLI model settings at most every 2s (or on forced scan)
+    // Refresh agent-owned metadata and CLI model settings at most every 2s (or on forced scan)
     if (options.forceFullDiscovery || now - this.lastJournalRefreshMs >= 2000) {
       this.journalIndex = readOrcaJournalIndex(
         this.orcaAppDirs,
@@ -962,7 +956,7 @@ export class TranscriptScanner {
       discovered.push({ agent, filePath: canonicalPath, sessionIdHint, mtimeMs, sizeBytes })
     }
 
-    // 1. Claude Code (`~/.claude/projects` + custom CLAUDE_CONFIG_DIR from Orca journal)
+    // 1. Claude Code (`~/.claude/projects` + custom CLAUDE_CONFIG_DIR)
     const rawClaudeHomes = [
       path.join(this.homeDir, '.claude'),
       ...(this.journalIndex.accountHomes.get('claude') ?? [])
@@ -1034,13 +1028,9 @@ export class TranscriptScanner {
         if (ent.isDirectory()) {
           rawAgBrainDirs.push(path.join(agAccs, ent.name, 'brain'))
           rawAgBrainDirs.push(path.join(agAccs, ent.name, 'antigravity-acp', 'brain'))
+          rawAgBrainDirs.push(path.join(agAccs, ent.name, 'antigravity-cli', 'brain'))
         }
       }
-    }
-    for (const h of this.journalIndex.accountHomes.get('antigravity') ?? []) {
-      rawAgBrainDirs.push(path.join(h, 'brain'))
-      rawAgBrainDirs.push(path.join(h, 'antigravity-acp', 'brain'))
-      rawAgBrainDirs.push(path.join(h, 'antigravity-cli', 'brain'))
     }
     for (const bdir of uniqueExistingDirs(rawAgBrainDirs)) {
       for (const conv of safeReaddir(bdir)) {
@@ -1063,17 +1053,7 @@ export class TranscriptScanner {
     const geminiRoot = path.join(this.homeDir, '.gemini')
     const geminiTmp = path.join(geminiRoot, 'tmp')
     if (fs.existsSync(geminiTmp)) {
-      const allKnownPaths = new Set<string>(this.knownWorkspacePaths)
-      for (const jMeta of this.journalIndex.byNativeId.values()) {
-        if (jMeta.workspacePath) allKnownPaths.add(jMeta.workspacePath)
-      }
-      for (const tTab of this.journalIndex.terminalTabs ?? []) {
-        if (tTab.workspacePath) allKnownPaths.add(tTab.workspacePath)
-      }
-      for (const tOv of this.journalIndex.terminalTabOverrides ?? []) {
-        if (tOv.workspacePath) allKnownPaths.add(tOv.workspacePath)
-      }
-      this.geminiProjectMap = buildGeminiProjectHashLookup(geminiRoot, allKnownPaths)
+      this.geminiProjectMap = buildGeminiProjectHashLookup(geminiRoot, this.knownWorkspacePaths)
       const found: Array<{ filePath: string; mtimeMs: number; sizeBytes: number; stat: Stats }> = []
       walkMatchingFiles(
         geminiTmp,

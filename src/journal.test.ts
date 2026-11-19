@@ -4,6 +4,7 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { assert, describe, test } from 'orca/testing'
 import { cleanAgentName, readOrcaJournalIndex } from './journal'
+import { TranscriptScanner } from './scanner'
 
 type TestSqliteHandle = {
   exec(sql: string): void
@@ -212,7 +213,7 @@ describe('Antigravity conversation_summaries agent_name extraction', () => {
   })
 })
 
-test('reads the current Orca session store before the legacy journal', () => {
+test('ignores both Orca private session stores', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-session-store-'))
   try {
     for (const store of ['journal', 'domain']) {
@@ -229,12 +230,47 @@ test('reads the current Orca session store before the legacy journal', () => {
       } finally {
         db.close()
       }
-      const index = readOrcaJournalIndex([dir], dir)
-      for (const provider of ['antigravity', 'codex', 'claude', 'gemini']) {
-        assert.equal(index.byNativeId.get(provider)?.title, store)
-      }
     }
+    const index = readOrcaJournalIndex([dir], dir)
+    assert.equal(index.byNativeId.size, 0)
   } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('scans custom provider homes and managed agent transcripts without Orca state', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-provider-homes-'))
+  const claudeHome = path.join(dir, 'custom-claude')
+  const codexHome = path.join(dir, 'custom-codex')
+  const orcaDir = path.join(dir, 'orca')
+  const priorClaudeHome = process.env.CLAUDE_CONFIG_DIR
+  const priorCodexHome = process.env.CODEX_HOME
+  function writeTranscript(relativePath: string, event: object): void {
+    const filePath = path.join(dir, relativePath)
+    fs.mkdirSync(path.dirname(filePath), { recursive: true })
+    fs.writeFileSync(filePath, JSON.stringify(event) + '\n')
+  }
+  try {
+    process.env.CLAUDE_CONFIG_DIR = claudeHome
+    process.env.CODEX_HOME = codexHome
+    const timestamp = new Date().toISOString()
+    writeTranscript('custom-claude/projects/project/claude.jsonl', { type: 'user', timestamp })
+    writeTranscript('custom-codex/sessions/custom.jsonl', { type: 'session_meta', timestamp, payload: { id: 'custom' } })
+    writeTranscript('orca/codex-accounts/account/sessions/managed.jsonl', { type: 'session_meta', timestamp, payload: { id: 'managed' } })
+    writeTranscript('orca/antigravity-accounts/account/antigravity-cli/brain/agy/.system_generated/logs/transcript.jsonl', { type: 'USER_INPUT', created_at: timestamp })
+    fs.writeFileSync(path.join(claudeHome, 'settings.json'), '{"model":"claude-opus"}')
+    fs.writeFileSync(path.join(codexHome, 'config.toml'), 'model = "gpt-codex"')
+
+    const scanner = new TranscriptScanner({ homeDir: dir, orcaAppDirs: [orcaDir] })
+    const sessions = scanner.scan({ forceFullDiscovery: true })
+    assert.deepEqual(sessions.map((session) => session.agent).sort(), ['antigravity', 'claude', 'codex', 'codex'])
+    assert.equal(scanner.getJournalIndex().cliConfiguredModels?.claude, 'claude-opus')
+    assert.equal(scanner.getJournalIndex().cliConfiguredModels?.codex, 'gpt-codex')
+  } finally {
+    if (priorClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = priorClaudeHome
+    if (priorCodexHome === undefined) delete process.env.CODEX_HOME
+    else process.env.CODEX_HOME = priorCodexHome
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

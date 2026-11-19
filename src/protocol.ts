@@ -28,6 +28,8 @@ export interface TpsStats {
 
 export interface OrcaLiveAgentInfo {
   terminalId: string | null
+  sessionId?: string | null
+  workspaceId?: string
   tabId?: string | null
   title: string | null
   agent: string | null
