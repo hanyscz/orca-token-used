@@ -951,7 +951,7 @@ export function buildDashboardSnapshot(
     })
 
   // 2. Live running / recently active agent cards
-  const liveCards = buildLiveAgentCards({
+  const allMainCards = buildLiveAgentCards({
     userSessions,
     journal,
     runtime,
@@ -961,13 +961,12 @@ export function buildDashboardSnapshot(
     now,
     allSessions: enrichedAll
   })
-  const subagentSessions = effectivePathNorm
-    ? enrichedAll.filter(
-        (s) => s.isSubagent && isSameOrChildWorktreePath(s.workspacePath, effectivePathNorm)
-      )
-    : enrichedAll.filter((s) => s.isSubagent)
-  const subagentCards = buildLiveAgentCards({
-    userSessions: subagentSessions,
+  const recentCutoffMs = now - LIVE_RECENT_MS
+  const allSubagentCards = buildLiveAgentCards({
+    userSessions: enrichedAll.filter((s) => s.isSubagent && (
+      Math.max(s.state.updatedAtMs, s.state.lastMtimeMs) >= recentCutoffMs ||
+      !effectivePathNorm || isSameOrChildWorktreePath(s.workspacePath, effectivePathNorm)
+    )),
     journal,
     runtime: { ...runtime, liveAgents: [] },
     effectivePathNorm,
@@ -977,9 +976,29 @@ export function buildDashboardSnapshot(
     allSessions: enrichedAll
   })
 
+  // Keep the recent lists compact, but always show each producer and its parent chain.
+  const allCards = [...allMainCards, ...allSubagentCards]
+  const byKey = new Map(allCards.map((card) => [card.sessionKey, card]))
+  const visible = new Set<LiveAgentCard>()
+  const recentChildren = allSubagentCards.filter((card) =>
+    card.state !== 'done' || !effectivePathNorm || isSameOrChildWorktreePath(card.workspacePath, effectivePathNorm)
+  )
+  for (const seed of [
+    ...allMainCards.slice(0, 12),
+    ...recentChildren.slice(0, 12),
+    ...allCards.filter((card) => card.liveOutRate > 0)
+  ]) {
+    let card: LiveAgentCard | undefined = seed
+    while (card && !visible.has(card)) {
+      visible.add(card)
+      card = card.parentSessionKey ? byKey.get(card.parentSessionKey) : undefined
+    }
+  }
+  const liveCards = allMainCards.filter((card) => visible.has(card))
+  const subagentCards = allSubagentCards.filter((card) => visible.has(card))
+  const liveTpsSum = [...visible].reduce((sum, card) => sum + card.liveOutRate, 0)
+
   const liveTokens = emptyTokenBreakdown()
-  let liveTpsSum = 0
-  let workingTpsCount = 0
   let maxPeakTps = 0
   let fallbackAvgSum = 0
   let fallbackAvgCount = 0
@@ -994,10 +1013,6 @@ export function buildDashboardSnapshot(
     liveTokens.costUsd += c.tokens.costUsd
 
     if (c.tps.peakTps > maxPeakTps) maxPeakTps = c.tps.peakTps
-    if (c.state === 'working' && c.tps.liveTps > 0) {
-      liveTpsSum += c.tps.liveTps
-      workingTpsCount++
-    }
     if (c.tps.avgTps > 0) {
       fallbackAvgSum += c.tps.avgTps
       fallbackAvgCount++
@@ -1006,8 +1021,6 @@ export function buildDashboardSnapshot(
   liveTokens.costUsd = +liveTokens.costUsd.toFixed(6)
 
   const avgAcrossLive = fallbackAvgCount > 0 ? +(fallbackAvgSum / fallbackAvgCount).toFixed(1) : 0
-  const headlineLiveTps =
-    workingTpsCount > 0 ? +liveTpsSum.toFixed(1) : liveCards[0]?.tps.liveTps ?? avgAcrossLive
 
   // 3. Day / Week / Month periods for both 'all' and 'worktree' scopes
   const todayStart = startOfLocalDay(now).getTime()
@@ -1053,7 +1066,7 @@ export function buildDashboardSnapshot(
     live: {
       tokens: liveTokens,
       tps: {
-        liveTps: +headlineLiveTps.toFixed(1),
+        liveTps: +liveTpsSum.toFixed(1),
         avgTps: avgAcrossLive,
         peakTps: +maxPeakTps.toFixed(1)
       },
@@ -1069,6 +1082,8 @@ export function buildDashboardSnapshot(
 }
 
 export const LIVE_SERIES_SECONDS = 60
+const LIVE_RATE_WINDOW_SECONDS = 8
+const LIVE_RECENT_MS = 15 * 60_000
 
 export function resolveSessionRunState(
   st: SessionTranscriptState,
@@ -1187,7 +1202,7 @@ function isRealPtyAgentEntry(la: OrcaLiveAgentInfo, hasJournalRecords: boolean):
   const tid = typeof la.terminalId === 'string' ? la.terminalId.trim() : ''
   if (!tid) {
     // Orca reports Structured Native Chat agents in `agents.list` with `terminalId: null`;
-    // those are authoritatively tracked by exact UUID in `agent-session-journal.db`.
+    // those are authoritatively tracked by exact UUID in Orca session records.
     return !hasJournalRecords
   }
   if (tid.startsWith('structured-agent-session-')) return false
@@ -1281,7 +1296,7 @@ function matchPtyTerminalsToSessions(
   now: number,
   allSessions?: EnrichedSession[]
 ): Map<string, OrcaLiveAgentInfo> {
-  const recentLiveCutoffMs = now - 15 * 60_000
+  const recentLiveCutoffMs = now - LIVE_RECENT_MS
   const hasJournalRecords = journal.byNativeId.size > 0
   const terminalTabs = getEffectiveTerminalTabs(journal)
   const sortedByRecent = [...userSessions].sort(
@@ -1327,8 +1342,7 @@ function matchPtyTerminalsToSessions(
 export function compute60sIoSeries(
   turns: Iterable<ParsedTurnUsage>,
   isWorking: boolean,
-  now: number,
-  activeTurnStartMs?: number | null
+  now: number
 ): {
   outSeries: number[]
   inSeries: number[]
@@ -1447,27 +1461,18 @@ export function compute60sIoSeries(
     }
   }
 
-  // Sort valid turns by completion timestamp (purely turn-dependent for strict world-time invariance)
-  const turnList: ParsedTurnUsage[] = []
-  for (const t of turns) {
-    if (Number.isFinite(t.timestampMs) && t.timestampMs > 0) {
-      turnList.push(t)
-    }
-  }
-  turnList.sort((a, b) => a.timestampMs - b.timestampMs)
-
-  // Include turns whose trailing Gaussian tail still overlaps `[startSec .. endSec]`
+  const sampleStartMs = safeNow - LIVE_RATE_WINDOW_SECONDS * 1000
+  let outRate = 0
+  let inRate = 0
   const relevanceCutoffMs = (startSec - 6) * 1000
-
-  for (const turn of turnList) {
-    const ts = turn.timestampMs
+  for (const turn of turns) {
+    const turnEndMs = turn.timestampMs
+    if (!Number.isFinite(turnEndMs) || turnEndMs < relevanceCutoffMs || turnEndMs > safeNow) continue
     const durMs =
       turn.durationSec !== null && Number.isFinite(turn.durationSec) && turn.durationSec > 0
-        ? Math.min(turn.durationSec, 120) * 1000
+        ? turn.durationSec * 1000
         : 1200
-    const turnEndMs = ts
-    const turnStartMs = turnEndMs - Math.max(400, durMs)
-    if (turnEndMs < relevanceCutoffMs) continue
+    const turnStartMs = turnEndMs - Math.min(120_000, Math.max(400, durMs))
 
     const outTokens = Math.max(0, (turn.output || 0) + (turn.reasoning || 0))
     if (outTokens > 0) {
@@ -1481,67 +1486,11 @@ export function compute60sIoSeries(
     if (inTokens > 0) {
       addSmoothStreamWave(inRaw, turnStartMs, turnEndMs, inTokens)
     }
-  }
 
-  const latestTurnEndMs = turnList.length > 0 ? turnList[turnList.length - 1].timestampMs : 0
-
-  // World-time-invariant in-flight active-turn stream bridge while `isWorking === true`:
-  // Bridges multi-second LLM/tool inference gaps between JSONL step flushes using ONLY integer second `s`
-  // and session turn data (zero dependence on `now`), so 60fps scrolling never jumps and 1s readouts breathe live.
-  if (isWorking) {
-    const recentSlice = turnList.slice(-3)
-    let recentOutSum = 0
-    let recentInSum = 0
-    let recentDurSum = 0
-    for (const rt of recentSlice) {
-      const dSec =
-        rt.durationSec !== null && Number.isFinite(rt.durationSec) && rt.durationSec > 0
-          ? Math.min(rt.durationSec, 120)
-          : 2.4
-      recentOutSum += Math.max(0, (rt.output || 0) + (rt.reasoning || 0))
-      recentInSum += Math.max(0, (rt.input || 0) + (rt.cacheRead || 0) + (rt.cacheWrite || 0))
-      recentDurSum += Math.max(0.8, dSec)
-    }
-
-    const baseOutRate =
-      recentDurSum > 0 && recentOutSum > 0
-        ? Math.min(800, Math.max(4, recentOutSum / recentDurSum))
-        : 26
-    const baseInRate =
-      recentDurSum > 0 && recentInSum > 0
-        ? Math.min(250_000, Math.max(120, recentInSum / recentDurSum))
-        : 1400
-
-    const startHintMs =
-      typeof activeTurnStartMs === 'number' &&
-      Number.isFinite(activeTurnStartMs) &&
-      activeTurnStartMs > 0
-        ? activeTurnStartMs
-        : 0
-    const anchorMs = Math.max(latestTurnEndMs, startHintMs)
-
-    if (anchorMs > 0) {
-      const anchorSec = Math.floor(anchorMs / 1000)
-      const phase = (Math.abs(anchorSec) % 628) / 100
-      const fillFrom = Math.max(startSec, anchorSec)
-      for (let s = fillFrom; s <= endSec; s++) {
-        const elapsed = s - anchorSec
-        const ramp = Math.min(1, (elapsed + 1) / 2.0)
-        const taper = elapsed <= 32 ? 1 : Math.exp(-(elapsed - 32) / 24)
-        const env = ramp * taper
-        if (env <= 0.01) continue
-
-        const waveOut =
-          0.86 + 0.16 * Math.sin(s * 1.23 + phase) + 0.08 * Math.cos(s * 0.71 - phase)
-        const waveIn =
-          0.82 + 0.2 * Math.sin(s * 0.97 + phase + 1.15) + 0.09 * Math.cos(s * 1.61 + phase)
-
-        const idx = s - startSec
-        const projOut = baseOutRate * env * Math.max(0.35, waveOut)
-        const projIn = baseInRate * env * Math.max(0.35, waveIn)
-        if (projOut > outRaw[idx]) outRaw[idx] = projOut
-        if (projIn > inRaw[idx]) inRaw[idx] = projIn
-      }
+    if (isWorking && turnEndMs > sampleStartMs) {
+      const fraction = Math.min(1, (turnEndMs - sampleStartMs) / durMs)
+      outRate += outTokens * fraction / LIVE_RATE_WINDOW_SECONDS
+      inRate += inTokens * fraction / LIVE_RATE_WINDOW_SECONDS
     }
   }
 
@@ -1552,25 +1501,13 @@ export function compute60sIoSeries(
     +(Number.isFinite(v) && v > 0.04 ? v : 0).toFixed(1)
   )
 
-  // Sample at the visible right-edge playhead (`endSec - 1`..`endSec`) when working;
-  // settle cleanly to `0` once stopped (`!isWorking`) after completion tail finishes
-  const stoppedAndSettled = !isWorking && (latestTurnEndMs <= 0 || safeNow - latestTurnEndMs > 2500)
-
-  const liveOutRate = stoppedAndSettled
-    ? 0
-    : +(
-        (outSeries[LIVE_SERIES_SECONDS - 2] ?? 0) * 0.65 +
-        (outSeries[LIVE_SERIES_SECONDS - 1] ?? 0) * 0.35
-      ).toFixed(1)
-
-  const liveInRate = stoppedAndSettled
-    ? 0
-    : +(
-        (inSeries[LIVE_SERIES_SECONDS - 2] ?? 0) * 0.65 +
-        (inSeries[LIVE_SERIES_SECONDS - 1] ?? 0) * 0.35
-      ).toFixed(1)
-
-  return { outSeries, inSeries, seriesEndSec: endSec, liveOutRate, liveInRate }
+  return {
+    outSeries,
+    inSeries,
+    seriesEndSec: endSec,
+    liveOutRate: +outRate.toFixed(1),
+    liveInRate: +inRate.toFixed(1)
+  }
 }
 
 const STATE_SORT_WEIGHT: Record<AgentRunState, number> = {
@@ -1580,17 +1517,8 @@ const STATE_SORT_WEIGHT: Record<AgentRunState, number> = {
   done: 3
 }
 
-function computeActiveTurnStartHint(
-  st: SessionTranscriptState,
-  jMeta: import('./journal').JournalSessionMeta | undefined,
-  ptyInfo?: OrcaLiveAgentInfo | null
-): number {
-  return Math.max(
-    st.lastInferenceStartMs ?? 0,
-    st.updatedAtMs ?? 0,
-    jMeta?.isTurnOpen ? (jMeta.turnUpdatedAt ?? 0) : 0,
-    ptyInfo?.state === 'working' ? (ptyInfo.stateStartedAt ?? 0) : 0
-  )
+function liveCardTps(tps: TpsStats, liveOutRate: number): TpsStats {
+  return { ...tps, liveTps: liveOutRate, peakTps: Math.max(tps.peakTps, liveOutRate) }
 }
 
 function buildLiveAgentCards(params: {
@@ -1613,7 +1541,7 @@ function buildLiveAgentCards(params: {
     now,
     allSessions
   } = params
-  const recentLiveCutoffMs = now - 15 * 60_000
+  const recentLiveCutoffMs = now - LIVE_RECENT_MS
   const sortedByRecent = [...userSessions].sort(
     (a, b) => b.state.updatedAtMs - a.state.updatedAtMs
   )
@@ -1622,7 +1550,6 @@ function buildLiveAgentCards(params: {
 
   const indexedWorkspaces = indexKnownWorkspaces(runtime.knownWorkspaces ?? [])
   const homeNorm = normalizeFsPath(os.homedir())
-  const nowEndSec = Math.floor((Number.isFinite(now) && now > 0 ? now : Date.now()) / 1000)
   const hasJournalRecords = journal.byNativeId.size > 0
   const terminalTabs = getEffectiveTerminalTabs(journal)
 
@@ -1674,6 +1601,7 @@ function buildLiveAgentCards(params: {
         now,
         la.stateStartedAt || 0
       )
+      const isWorking = resolvedState === 'working'
       if (
         hasActiveChildSubagent(
           matchedSession.state.agent,
@@ -1685,22 +1613,11 @@ function buildLiveAgentCards(params: {
       ) {
         resolvedState = 'waiting'
       }
-      const isWorking = resolvedState === 'working'
-      const activeStartHint = computeActiveTurnStartHint(matchedSession.state, undefined, la)
       const io = compute60sIoSeries(
         matchedSession.state.turnsByKey.values(),
         isWorking,
-        now,
-        activeStartHint
+        now
       )
-      const cardTps =
-        isWorking && io.liveOutRate > 0
-          ? {
-              ...matchedSession.tps,
-              liveTps: io.liveOutRate,
-              peakTps: Math.max(matchedSession.tps.peakTps, io.liveOutRate)
-            }
-          : matchedSession.tps
       cards.push({
         id: la.terminalId || sKey,
         sessionKey: sKey,
@@ -1719,7 +1636,7 @@ function buildLiveAgentCards(params: {
         workspaceName: matchedSession.workspaceName,
         workspacePath: matchedSession.workspacePath,
         updatedAt: Math.max(matchedSession.state.updatedAtMs, la.stateStartedAt || 0),
-        tps: cardTps,
+        tps: liveCardTps(matchedSession.tps, io.liveOutRate),
         sparkline: matchedSession.sparkline,
         outSeries: io.outSeries,
         inSeries: io.inSeries,
@@ -1737,13 +1654,7 @@ function buildLiveAgentCards(params: {
         homeNorm
       )
       const fallbackKey = `terminal:${la.terminalId || idx}`
-      const isWorking = la.state === 'working'
-      const io = compute60sIoSeries(
-        [],
-        isWorking,
-        now,
-        isWorking && la.stateStartedAt > 0 ? la.stateStartedAt : 0
-      )
+      const io = compute60sIoSeries([], false, now)
       const nonGenericLaTitle =
         la.title && !isGenericTerminalTabLabel(la.title, matchedTab?.rawTabLabel)
           ? la.title.trim()
@@ -1772,14 +1683,11 @@ function buildLiveAgentCards(params: {
             : effectiveName || 'local',
         workspacePath: termWsPath ?? effectivePathNorm,
         updatedAt: la.stateStartedAt || now,
-        tps:
-          isWorking && io.liveOutRate > 0
-            ? { liveTps: io.liveOutRate, avgTps: io.liveOutRate, peakTps: io.liveOutRate }
-            : emptyTpsStats(),
+        tps: emptyTpsStats(),
         sparkline: [],
         outSeries: io.outSeries,
         inSeries: io.inSeries,
-        seriesEndSec: nowEndSec,
+        seriesEndSec: io.seriesEndSec,
         liveOutRate: io.liveOutRate,
         liveInRate: io.liveInRate,
         tokens: emptyTokenBreakdown()
@@ -1808,20 +1716,11 @@ function buildLiveAgentCards(params: {
 
     claimedSessionKeys.add(sKey)
     let state = resolveSessionRunState(s.state, jMeta, null, now)
+    const isWorking = state === 'working'
     if (hasActiveChild) {
       state = 'waiting'
     }
-    const isWorking = state === 'working'
-    const activeStartHint = computeActiveTurnStartHint(s.state, jMeta, null)
-    const io = compute60sIoSeries(s.state.turnsByKey.values(), isWorking, now, activeStartHint)
-    const cardTps =
-      isWorking && io.liveOutRate > 0
-        ? {
-            ...s.tps,
-            liveTps: io.liveOutRate,
-            peakTps: Math.max(s.tps.peakTps, io.liveOutRate)
-          }
-        : s.tps
+    const io = compute60sIoSeries(s.state.turnsByKey.values(), isWorking, now)
     cards.push({
       id: sKey,
       sessionKey: sKey,
@@ -1837,7 +1736,7 @@ function buildLiveAgentCards(params: {
       workspaceName: s.workspaceName,
       workspacePath: s.workspacePath,
       updatedAt: s.state.updatedAtMs,
-      tps: cardTps,
+      tps: liveCardTps(s.tps, io.liveOutRate),
       sparkline: s.sparkline,
       outSeries: io.outSeries,
       inSeries: io.inSeries,
@@ -1863,7 +1762,7 @@ function buildLiveAgentCards(params: {
     return b.updatedAt - a.updatedAt
   })
 
-  return cards.slice(0, 12)
+  return cards
 }
 
 export function pollSingleLiveAgent(
@@ -1916,6 +1815,7 @@ export function pollSingleLiveAgent(
 
   const jMeta = journal.byNativeId.get(fallback.state.sessionId)
   let state = resolveSessionRunState(fallback.state, jMeta, null, now)
+  const isWorking = state === 'working'
   if (
     hasActiveChildSubagent(
       fallback.state.agent,
@@ -1927,13 +1827,10 @@ export function pollSingleLiveAgent(
   ) {
     state = 'waiting'
   }
-  const isWorking = state === 'working'
-  const activeStartHint = computeActiveTurnStartHint(fallback.state, jMeta, null)
   const io = compute60sIoSeries(
     fallback.state.turnsByKey.values(),
     isWorking,
-    now,
-    activeStartHint
+    now
   )
   const sKey = `${fallback.state.agent}:${fallback.state.sessionId}`
   return {
@@ -1951,7 +1848,7 @@ export function pollSingleLiveAgent(
     workspaceName: fallback.workspaceName,
     workspacePath: fallback.workspacePath,
     updatedAt: fallback.state.updatedAtMs,
-    tps: fallback.tps,
+    tps: liveCardTps(fallback.tps, io.liveOutRate),
     sparkline: fallback.sparkline,
     outSeries: io.outSeries,
     inSeries: io.inSeries,

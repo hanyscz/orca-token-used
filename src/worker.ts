@@ -168,9 +168,11 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
 
     try {
       if (orca.host.has('agents.list')) {
+        const previousAgents = runtime.liveAgents
         const res = await orca.host.call('agents.list', {})
+        const focusedWorkspace = workspaceListCache.find((w) => w.id === lastReadContext?.workspaceId)
         const prevByTerminalId = new Map<string, OrcaLiveAgentInfo>()
-        for (const p of runtime.liveAgents) {
+        for (const p of previousAgents) {
           if (p.terminalId) prevByTerminalId.set(p.terminalId, p)
         }
         const freshIds = new Set<string>()
@@ -181,6 +183,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
             ? terminalToWorkspacePath.get(a.terminalId) ??
               extractWorkspacePathFromId(a.terminalId) ??
               prev?.workspacePath ??
+              focusedWorkspace?.path ??
               null
             : null
           const rawA = a as { tabId?: string | null; paneKey?: string | null }
@@ -210,15 +213,33 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
             workspacePath: wsPath
           }
         })
+        // agents.list covers only the focused workspace. Check background terminals before
+        // carrying their cached state forward, since closing a pane may emit no final event.
+        const backgroundTerminals = new Map<string, Set<string> | null>()
         const staleDoneCutoff = now - 15 * 60_000
-        for (const prev of runtime.liveAgents) {
+        for (const prev of previousAgents) {
           if (!prev.terminalId || freshIds.has(prev.terminalId)) continue
           if (prev.state === 'done' && prev.stateStartedAt > 0 && prev.stateStartedAt < staleDoneCutoff) {
             continue
           }
+          if (prev.state !== 'done') {
+            const ws = workspaceListCache.find((w) => w.path === prev.workspacePath)
+            if (ws && ws.id === focusedWorkspace?.id) continue
+            if (ws && orca.host.has('terminal.list')) {
+              if (!backgroundTerminals.has(ws.id)) {
+                const roster = await orca.host.call('terminal.list', { workspaceId: ws.id }).catch(() => null)
+                backgroundTerminals.set(
+                  ws.id,
+                  roster && !roster.truncated ? new Set(roster.terminals.map((t) => t.id)) : null
+                )
+              }
+              if (backgroundTerminals.get(ws.id)?.has(prev.terminalId) === false) continue
+            }
+          }
           nextAgents.push(prev)
         }
-        runtime.liveAgents = nextAgents
+        // A status event or another refresh may have replaced the snapshot during a host call.
+        if (runtime.liveAgents === previousAgents) runtime.liveAgents = nextAgents
       }
     } catch (err) {
       orca.log(`agents.list failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -422,7 +443,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     if (!orca.host.has('statusBar.update')) return
     const msg = getMessages(currentLocale)
     const dayTokens = snap.periods.all.day.tokens
-    const anyWorking = snap.live.agents.some((a) => a.state === 'working')
+    const anyWorking = snap.live.tps.liveTps > 0 || snap.live.agents.some((a) => a.state === 'working')
     const tpsVal = anyWorking ? snap.live.tps.liveTps : snap.periods.all.day.tps.avgTps
     const tokStr = formatTokens(dayTokens.total)
     const costStr = formatUsd(dayTokens.costUsd)

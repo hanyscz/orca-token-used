@@ -882,6 +882,8 @@ export function applyAntigravityLines(state: SessionTranscriptState, lines: stri
       state.maxAgStepIndex = stepIndex
       if (stepType === 'USER_INPUT') {
         state.lastEventState = 'working'
+      } else if (stepType === 'ERROR_MESSAGE' && stepStatus === 'DONE') {
+        state.lastEventState = 'done'
       } else if (stepType === 'PLANNER_RESPONSE') {
         const toolCalls = Array.isArray(obj.tool_calls) ? obj.tool_calls : []
         const hasAskQuestion = toolCalls.some((tc) => {

@@ -943,7 +943,7 @@ function readAntigravityMetadata(
 }
 
 /**
- * Reads Orca's `agent-session-journal.db`, `profile-state.db` tab headers, and local Antigravity
+ * Reads Orca's session records, `profile-state.db` tab headers, and local Antigravity
  * `conversation_summaries.db` / `history.jsonl` strictly in `readOnly: true` mode.
  */
 export function readOrcaJournalIndex(
@@ -989,8 +989,9 @@ export function readOrcaJournalIndex(
   }
 
   for (const orcaDir of orcaDirs) {
-    const dbPath = path.join(orcaDir, 'agent-session-journal.db')
-    if (fs.existsSync(dbPath)) {
+    for (const filename of ['agent-session-domain.db', 'agent-session-journal.db']) {
+      const dbPath = path.join(orcaDir, filename)
+      if (!fs.existsSync(dbPath)) continue
       let db: SqliteReadOnlyDb | null = null
       try {
         db = new DatabaseSyncCtor(dbPath, { readOnly: true, timeout: 500 })
@@ -1092,8 +1093,9 @@ export function readOrcaJournalIndex(
             }
           }
         }
+        break
       } catch {
-        // Ignore locked/corrupt DB and continue
+        // Fall back to the legacy store if the current store cannot be read.
       } finally {
         try {
           db?.close()

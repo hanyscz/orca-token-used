@@ -211,3 +211,30 @@ describe('Antigravity conversation_summaries agent_name extraction', () => {
     }
   })
 })
+
+test('reads the current Orca session store before the legacy journal', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-session-store-'))
+  try {
+    for (const store of ['journal', 'domain']) {
+      const db = openWritableTestSqlite(path.join(dir, `agent-session-${store}.db`))
+      try {
+        db.exec('CREATE TABLE agent_session_records (session_id TEXT PRIMARY KEY, record_json TEXT)')
+        for (const provider of ['antigravity', 'codex', 'claude', 'gemini']) {
+          db.prepare('INSERT INTO agent_session_records VALUES (?, ?)').run(provider, JSON.stringify({
+            provider,
+            conversationName: store,
+            providerHandleChain: [{ handle: { nativeId: provider } }]
+          }))
+        }
+      } finally {
+        db.close()
+      }
+      const index = readOrcaJournalIndex([dir], dir)
+      for (const provider of ['antigravity', 'codex', 'claude', 'gemini']) {
+        assert.equal(index.byNativeId.get(provider)?.title, store)
+      }
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

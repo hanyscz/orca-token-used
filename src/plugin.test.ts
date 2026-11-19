@@ -829,20 +829,17 @@ describe('Aggregator, Left-Sidebar Project/Worktree Focus, Pure-Icon UI & i18n',
     assert.deepEqual(ioNextSec.outSeries.slice(0, 59), ioSpiky.outSeries.slice(1, 60))
     assert.deepEqual(ioNextSec.inSeries.slice(0, 59), ioSpiky.inSeries.slice(1, 60))
 
-    // Verify `liveOutRate` and `liveInRate` are non-zero and dynamically evolve across 1s ticks while `working`,
-    // then settle cleanly to `0` once stopped (`isWorking = false`)
-    const ioSec2 = compute60sIoSeries(sNewerA.turnsByKey.values(), true, now + 2000)
-    assert.ok(ioSpiky.liveOutRate > 0 && ioNextSec.liveOutRate > 0 && ioSec2.liveOutRate > 0)
-    assert.ok(ioSpiky.liveInRate > 0 && ioNextSec.liveInRate > 0 && ioSec2.liveInRate > 0)
-    assert.ok(
-      new Set([ioSpiky.liveOutRate, ioNextSec.liveOutRate, ioSec2.liveOutRate]).size >= 2,
-      'Active working Output tok/s readout should dynamically update across consecutive 1s polls'
-    )
-    assert.ok(
-      new Set([ioSpiky.liveInRate, ioNextSec.liveInRate, ioSec2.liveInRate]).size >= 2,
-      'Active working Input tok/s readout should dynamically update across consecutive 1s polls'
-    )
-    const ioStopped = compute60sIoSeries(sNewerA.turnsByKey.values(), false, now + 5000)
+    // Only recent reported usage contributes to live rates, even if the terminal stays working.
+    assert.equal(ioSpiky.liveOutRate, 0)
+    assert.equal(ioSpiky.liveInRate, 0)
+    const sampleTime = sNewerA.updatedAtMs
+    const ioActive = compute60sIoSeries(sNewerA.turnsByKey.values(), true, sampleTime)
+    assert.equal(ioActive.liveOutRate, 100)
+    assert.equal(ioActive.liveInRate, 700)
+    const ioBetweenReports = compute60sIoSeries(sNewerA.turnsByKey.values(), true, sampleTime + 4000)
+    assert.equal(ioBetweenReports.liveOutRate, 50)
+    assert.equal(ioBetweenReports.liveInRate, 350)
+    const ioStopped = compute60sIoSeries(sNewerA.turnsByKey.values(), false, sampleTime)
     assert.equal(ioStopped.liveOutRate, 0)
     assert.equal(ioStopped.liveInRate, 0)
 
@@ -851,6 +848,8 @@ describe('Aggregator, Left-Sidebar Project/Worktree Focus, Pure-Icon UI & i18n',
     const pulseLiveCard = snapA.live.agents.find((a) => a.sessionKey === 'antigravity:s-pulse-b')
     assert.ok(pulseLiveCard)
     assert.equal(pulseLiveCard.state, 'done')
+    assert.equal(pulseLiveCard.tps.liveTps, 0)
+    assert.equal(snapA.live.tps.liveTps, snapA.live.agents.reduce((sum, a) => sum + a.liveOutRate, 0))
 
     // Expanding a single agent in Live mode must show explicit model input/output labels.
     const targetAgent = snapA.live.agents.find((a) => a.sessionKey === 'codex:s-newer-a')!
@@ -864,6 +863,8 @@ describe('Aggregator, Left-Sidebar Project/Worktree Focus, Pure-Icon UI & i18n',
       selectedLiveAgentKey: targetAgent.sessionKey,
       nowMs: now
     })
+    assert.ok(htmlExpandedLive.includes('data-io-text="out-rate">0 tok/s'))
+    assert.ok(htmlExpandedLive.includes('Avg <span data-io-text="avg">100 tok/s'))
     assert.ok(htmlExpandedLive.includes('tp-io-monitor'))
     assert.ok(!htmlExpandedLive.includes('tp-io-live-dot'))
     assert.ok(htmlExpandedLive.includes('data-io-path="out-stroke"'))
@@ -876,6 +877,8 @@ describe('Aggregator, Left-Sidebar Project/Worktree Focus, Pure-Icon UI & i18n',
       locale: 'en',
       nowMs: now
     })
+    assert.ok(htmlLiveOverview.includes('class="tp-session-avg">Avg 100 tok/s'))
+    assert.ok(htmlLiveOverview.includes('0 tok/s<span class="tp-expand-chevron"'))
     assert.ok(htmlLiveOverview.includes(getMessages('en').liveCostLabel))
     assert.ok(htmlLiveOverview.includes(getMessages('en').todayCostLabel))
     assert.ok(htmlLiveOverview.includes('tp-subagent-children'))
@@ -2795,6 +2798,8 @@ describe('Terminal Tab & Handoff Title Synchronization Regressions', () => {
     const pCard1 = snap1.live.agents.find((c) => c.sessionKey === `codex:${parentId}`)
     const pSess1 = snap1.sessions.find((s) => s.sessionId === parentId)
 
+    assert.equal(snap1.live.tps.liveTps, 6.3) // 50 child tokens over the 8-second window
+    assert.equal(pCard1?.liveOutRate, 0)
     assert.ok(pCard1, 'Parent card must be present in snap.live.agents')
     assert.equal(pCard1?.state, 'waiting', 'Parent card state must be elevated to waiting when child is working')
     assert.equal(pSess1?.active, true, 'Parent session item in sessions list must be active when child is working')
@@ -2809,6 +2814,7 @@ describe('Terminal Tab & Handoff Title Synchronization Regressions', () => {
     sChild.lastEventState = 'done'
     const snap3 = buildDashboardSnapshot([sParent, sChild], emptyJournal, pricing, runtime, now)
     const pCard3 = snap3.live.agents.find((c) => c.sessionKey === `codex:${parentId}`)
+    assert.equal(snap3.live.tps.liveTps, 0)
     assert.equal(pCard3?.state, 'done', 'Parent card state must revert to done when child finishes')
   })
 
@@ -4288,4 +4294,116 @@ describe('Readable Subagent Titles & Metadata Wiring', () => {
     assert.equal(snap.live.agents[0]?.modelLabel, 'gemini-4-carbon-medium')
     assert.deepEqual(snap.live.agents[0]?.reasoningLevels, ['High', 'Medium'])
   })
+})
+
+test('closes an Antigravity turn on a terminal error and resumes on new input', () => {
+  const st = createEmptySessionState('tour', 'antigravity', '/tmp/tour.jsonl')
+  const event = (step_index: number, type: string) =>
+    JSON.stringify({ step_index, type, status: 'DONE', created_at: new Date(step_index * 1000).toISOString() })
+  applyAntigravityLines(st, [event(1, 'USER_INPUT'), event(2, 'ERROR_MESSAGE')])
+  assert.equal(st.lastEventState, 'done')
+  assert.equal(resolveSessionRunState(st, undefined, 'working', 3_000, 2_900), 'working')
+  applyAntigravityLines(st, [event(3, 'USER_INPUT')])
+  assert.equal(st.lastEventState, 'working')
+})
+
+test('forgets a background working terminal once its workspace no longer lists it', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-background-pty-'))
+  process.env.TOKEN_PULSE_HOME_DIR = dir
+  process.env.TOKEN_PULSE_ORCA_DATA_DIR = dir
+  let open = true
+  const host = mockHost({
+    results: {
+      'workspace.list': () => ({
+        workspaces: [{ id: 'background', path: dir, name: 'main', project: 'test', kind: 'worktree', hostId: 'local', branch: 'main' }],
+        truncated: false
+      }),
+      'workspace.readContext': () => ({ workspaceId: 'focused', branch: 'main', displayName: 'other', terminals: [] }),
+      'agents.list': () => ({ agents: [] }),
+      'terminal.list': () => ({ terminals: open ? [{ id: 'term_background' }] : [], truncated: false }),
+      'statusBar.update': () => ({ ok: true })
+    }
+  })
+  try {
+    const worker = await mountWorker(await import('./worker'), { host })
+    try {
+      await worker.emit('agent.status.changed', {
+        workspaceId: 'background', terminalId: 'term_background', title: 'agy',
+        paneKey: 'bg:leaf', state: 'working', receivedAt: Date.now()
+      })
+      const snapshot = () => worker.request('dashboard.get', { forceScan: true })
+      assert.ok((await snapshot()).live.agents.some((a) => a.terminalId === 'term_background'))
+      open = false
+      assert.ok(!(await snapshot()).live.agents.some((a) => a.terminalId === 'term_background'))
+    } finally {
+      await worker.deactivate()
+    }
+  } finally {
+    delete process.env.TOKEN_PULSE_HOME_DIR
+    delete process.env.TOKEN_PULSE_ORCA_DATA_DIR
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('Live TPS lists every producer and its available ancestors across workspaces and card limits', () => {
+  const now = Date.now()
+  const session = (id: string, cwd: string, parentId?: string) => {
+    const st = createEmptySessionState(id, 'antigravity', `/tmp/${id}.jsonl`)
+    st.cwd = cwd
+    st.updatedAtMs = now
+    st.lastEventState = 'working'
+    st.isSubagent = Boolean(parentId)
+    st.parentSessionId = parentId ?? null
+    st.turnsByKey.set('turn', {
+      turnKey: 'turn', timestampMs: now, output: 80, reasoning: 0, input: 100,
+      cacheRead: 0, cacheWrite: 0, total: 180, durationSec: 8, tps: 10,
+      model: null, explicitCostUsd: null
+    })
+    return st
+  }
+  const parent = session('parent', '/focused')
+  parent.lastEventState = 'waiting'
+  const children = Array.from({ length: 13 }, (_, i) => session(`child-${i}`, '/focused', 'parent'))
+  const background = session('nested', '/other', 'child-0')
+  const done = session('finished', '/other', 'parent')
+  done.lastEventState = 'done'
+  const roots = Array.from({ length: 13 }, (_, i) => session(`root-${i}`, '/other'))
+  const snap = buildDashboardSnapshot(
+    [parent, ...children, background, { ...background, filePath: '/archive/nested.jsonl' }, done, ...roots],
+    createTestJournalIndex(), new PricingEngine(), {
+      focusedId: null, focusedName: 'focused', focusedPath: '/focused',
+      focusedProject: null, focusedBranch: null, liveAgents: []
+    }, now
+  )
+  const cards = [...snap.live.agents, ...snap.live.subagents]
+  assert.equal(cards.reduce((sum, card) => sum + card.liveOutRate, 0), snap.live.tps.liveTps)
+  assert.equal(new Set(cards.map((card) => card.sessionKey)).size, cards.length)
+  assert.ok(snap.live.agents.some((card) => card.sessionKey === 'antigravity:parent'))
+  assert.ok(snap.live.subagents.some((card) => card.sessionKey === 'antigravity:nested' && card.liveOutRate === 10))
+  assert.ok(!snap.live.subagents.some((card) => card.sessionKey === 'antigravity:finished'))
+  // The waiting root contributes zero. All 13 children (including the producing
+  // parent of the nested worker), the nested worker, and 13 independent roots contribute.
+  assert.equal(snap.live.tps.liveTps, 270)
+})
+
+test('Live renders nested, orphaned and cyclic subagent cards once each', () => {
+  const snap = createQuotaTestSnapshot(undefined, Date.now())
+  const card = (key: string, parentSessionKey?: string): DashboardSnapshot['live']['agents'][number] => ({
+    id: key, sessionKey: key, parentSessionKey, title: key, agent: 'codex', state: 'working',
+    terminalId: null, providerLabel: 'OpenAI', modelLabel: 'Codex', projectName: null,
+    workspaceName: 'main', workspacePath: null, updatedAt: snap.generatedAt,
+    tokens: snap.live.tokens, tps: snap.live.tps, sparkline: [], outSeries: [], inSeries: [],
+    liveOutRate: 10, liveInRate: 0
+  })
+  snap.live.agents = [card('main')]
+  snap.live.subagents = [
+    card('grandchild', 'child'), card('child', 'main'),
+    card('orphan-leaf', 'orphan'), card('orphan', 'missing'),
+    card('cycle-a', 'cycle-b'), card('cycle-b', 'cycle-a')
+  ]
+  const html = renderDashboardShellHtml({ snap, tab: 'live', scope: 'all', locale: 'en' })
+  const keys = [...html.matchAll(/data-live-agent-key="([^"]+)"/g)].map((match) => match[1])
+  assert.deepEqual([...keys].sort(), ['main', ...snap.live.subagents.map((item) => item.sessionKey)].sort())
+  assert.ok(keys.indexOf('child') < keys.indexOf('grandchild'))
+  assert.ok(keys.indexOf('orphan') < keys.indexOf('orphan-leaf'))
 })

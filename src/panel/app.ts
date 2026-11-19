@@ -440,7 +440,6 @@ export function renderLiveAgentDetailHtml(agent: LiveAgentCard, msg: UiMessages)
           <span class="tp-project-tag" data-io-text="proj" title="${escapeHtml(agent.workspacePath || projWt)}">${escapeHtml(projWt)}</span>
         </div>
         <div class="tp-io-meta-line">
-          <span>${escapeHtml(msg.avgLabel)} <span class="tp-io-accent-out" data-io-text="avg">${agent.tps.avgTps.toFixed(1)}/s</span></span>
           <span>${escapeHtml(msg.peakLabel)} <span class="tp-io-accent-peak" data-io-text="peak">${agent.tps.peakTps.toFixed(1)}/s</span></span>
           <span>${escapeHtml(msg.outputShort)} <strong data-io-text="tok-out">${formatTokens(outTotal)}</strong></span>
           <span>${escapeHtml(msg.inputShort)} <strong data-io-text="tok-in">${formatTokens(inTotal)}</strong></span>
@@ -454,7 +453,10 @@ export function renderLiveAgentDetailHtml(agent: LiveAgentCard, msg: UiMessages)
           <span class="tp-io-panel-title">${escapeHtml(msg.outputStreamLabel)}</span>
           <span class="tp-io-panel-rate" data-io-text="out-rate">${escapeHtml(formatRateTokPerSec(agent.liveOutRate))}</span>
         </div>
-        <div class="tp-io-scale-max" data-io-text="out-max">${escapeHtml(formatScaleTokPerSec(outWave.scaleMax))}</div>
+        <div class="tp-row-between">
+          <span class="tp-io-scale-max" data-io-text="out-max">${escapeHtml(formatScaleTokPerSec(outWave.scaleMax))}</span>
+          <span class="tp-session-avg">${escapeHtml(msg.avgLabel)} <span data-io-text="avg">${formatRateTokPerSec(agent.tps.avgTps)}</span></span>
+        </div>
         ${outWave.html}
       </section>
 
@@ -585,7 +587,6 @@ function renderLiveView(
 
   const renderAgentCard = (a: LiveAgentCard, nested = false): string => {
     const color = AGENT_COLORS[a.agent]
-    const shownTps = a.state === 'working' ? a.tps.liveTps : a.tps.avgTps
     const providerModel = `${a.providerLabel} · ${a.modelLabel}`
     const projWt = formatProjectWorktreeLabel(a.projectName, a.workspaceName)
     return `
@@ -605,7 +606,7 @@ function renderLiveView(
             </span>
           </div>
           <span class="tp-mono-stat" style="color:${color}">
-            ${shownTps.toFixed(1)} tok/s<span class="tp-expand-chevron">›</span>
+            ${formatRateTokPerSec(a.liveOutRate)}<span class="tp-expand-chevron">›</span>
           </span>
         </div>
         <div class="tp-row-between">
@@ -615,7 +616,10 @@ function renderLiveView(
           </div>
           ${renderSparklineSvg(a.sparkline, color)}
         </div>
-        <div class="tp-session-title tp-title-${a.state}" title="${escapeHtml(a.title)}">${escapeHtml(a.title)}</div>
+        <div class="tp-row-between">
+          <div class="tp-session-title tp-title-${a.state}" title="${escapeHtml(a.title)}">${escapeHtml(a.title)}</div>
+          <span class="tp-session-avg">${escapeHtml(msg.avgLabel)} ${formatRateTokPerSec(a.tps.avgTps)}</span>
+        </div>
         <div class="tp-row-between" style="font-size:11px;color:var(--tp-muted)">
           <span class="tp-project-tag" title="${escapeHtml(a.workspacePath || projWt)}">${escapeHtml(projWt)}</span>
           <span>
@@ -627,15 +631,26 @@ function renderLiveView(
     `
   }
 
-  const renderAgentCards = (items: LiveAgentCard[], subagentPool: LiveAgentCard[]): string => {
-    const childrenByParent = new Map<string, LiveAgentCard[]>()
-    for (const child of subagentPool) {
-      if (!child.parentSessionKey) continue
-      const children = childrenByParent.get(child.parentSessionKey) ?? []
-      children.push(child)
-      childrenByParent.set(child.parentSessionKey, children)
+  const allSessionKeys = new Set([...agents, ...subagents].map((agent) => agent.sessionKey))
+  const parentByChild = new Map<string, string>()
+  const childrenByParent = new Map<string, LiveAgentCard[]>()
+  const orphanSubagents: LiveAgentCard[] = []
+  for (const child of subagents) {
+    const parent = child.parentSessionKey
+    // Drop the edge that would close a malformed parent cycle.
+    let ancestor = parent
+    while (ancestor && ancestor !== child.sessionKey) ancestor = parentByChild.get(ancestor)
+    if (!parent || !allSessionKeys.has(parent) || ancestor === child.sessionKey) {
+      orphanSubagents.push(child)
+      continue
     }
+    parentByChild.set(child.sessionKey, parent)
+    const children = childrenByParent.get(parent) ?? []
+    children.push(child)
+    childrenByParent.set(parent, children)
+  }
 
+  const renderAgentCards = (items: LiveAgentCard[], nested = false): string => {
     const renderSubagentGroups = (
       parent: LiveAgentCard,
       children: LiveAgentCard[],
@@ -685,16 +700,14 @@ function renderLiveView(
       }`
     }
 
-    return `<div class="tp-list">${items.map((agent) => renderTree(agent)).join('')}</div>`
+    const className = nested ? 'tp-subagent-orphans' : 'tp-list'
+    return `<div class="${className}">${items.map((agent) => renderTree(agent, nested ? 1 : 0)).join('')}</div>`
   }
 
   const groupOrder: AgentRunState[] = ['working', 'waiting', 'blocked', 'done']
-  const mainSessionKeys = new Set(agents.map((agent) => agent.sessionKey))
-  const orphanSubagents = subagents.filter(
-    (agent) => !agent.parentSessionKey || !mainSessionKeys.has(agent.parentSessionKey)
-  )
+  const rootCount = agents.length + orphanSubagents.length
   const cardsHtml =
-    agents.length === 0
+    rootCount === 0
       ? `<div class="tp-empty">${escapeHtml(msg.noLiveAgents)}</div>`
       : groupOrder
           .map((state) => {
@@ -705,7 +718,7 @@ function renderLiveView(
               key,
               msg.states[state],
               items.length,
-              renderAgentCards(items, subagents),
+              renderAgentCards(items),
               collapsedGroups[key] ?? state === 'done'
             )
           })
@@ -721,9 +734,7 @@ function renderLiveView(
               key,
               msg.states[state],
               items.length,
-              `<div class="tp-subagent-orphans">${items
-                .map((agent) => renderAgentCard(agent, true))
-                .join('')}</div>`,
+              renderAgentCards(items, true),
               collapsedGroups[key] ?? state === 'done'
             )
           })
@@ -733,8 +744,8 @@ function renderLiveView(
   return `
     ${kpiHtml}
     <div class="tp-section-hdr">
-      <span>${escapeHtml(msg.runningAgentsHeader)} (${agents.length})</span>
-      ${agents.length > 0 ? `<span class="tp-section-hint">${escapeHtml(msg.clickToInspectHint)}</span>` : ''}
+      <span>${escapeHtml(msg.runningAgentsHeader)} (${rootCount})</span>
+      ${rootCount > 0 ? `<span class="tp-section-hint">${escapeHtml(msg.clickToInspectHint)}</span>` : ''}
     </div>
     ${cardsHtml}
     ${orphanSubagentHtml}
@@ -1820,7 +1831,7 @@ function initBrowserPanel(): void {
     setIoText(detailRoot, 'model', agent.modelLabel)
     setIoText(detailRoot, 'title', agent.title)
     setIoText(detailRoot, 'proj', projWt)
-    setIoText(detailRoot, 'avg', `${agent.tps.avgTps.toFixed(1)}/s`)
+    setIoText(detailRoot, 'avg', formatRateTokPerSec(agent.tps.avgTps))
     setIoText(detailRoot, 'peak', `${agent.tps.peakTps.toFixed(1)}/s`)
     setIoText(detailRoot, 'tok-out', formatTokens(outTotal))
     setIoText(detailRoot, 'tok-in', formatTokens(inTotal))

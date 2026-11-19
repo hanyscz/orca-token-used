@@ -2,6 +2,20 @@
 
 All notable changes to Token Pulse are documented in this file.
 
+## [0.1.6] - 2026-11-19
+
+### Fixed
+
+- Live TPS now includes producing agents and subagents across workspaces. Each
+  contributing session appears once, including nested workers and sessions
+  beyond the 12-card recent list.
+- Cards and I/O details use an 8-second window of reported token usage.
+  Finished sessions show 0 tok/s and retain their average generation rate.
+- Live clears stale working states when terminals close and recognizes completed
+  Antigravity error events.
+- Session matching reads Orca's current session database with a fallback for
+  older versions. New Antigravity conversations appear under their own titles.
+
 ## [0.1.5] - 2026-11-17
 
 ### Fixed

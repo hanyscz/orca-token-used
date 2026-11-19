@@ -24,6 +24,19 @@ The plugin uses Orca's `trusted-worker` profile. Orca will show the requested ac
 - Online pricing refresh from OpenRouter and models.dev, with offline built-in rates.
 - Light and dark Orca themes.
 
+## Reading Live TPS
+
+**Live TPS** adds up the output rates of individual agents and subagents across
+workspaces. Each card shows that session's own output. When a parent is waiting
+for a child, expand the group to see which session is producing tokens. Every
+session contributing to the total has a card, even when the recent list exceeds
+12 entries.
+
+The current rate uses the last 8 seconds of reported usage. A working agent can
+show 0 tok/s between usage reports. A finished session shows 0 tok/s and keeps
+its average generation rate. In the I/O detail view, the curves show the last
+60 seconds of reported input and output.
+
 ## Views
 
 These compact sidebar captures show the full navigation set and the status-bar summary:
@@ -47,7 +60,7 @@ The worker reads local files in read-only mode to calculate usage and match sess
 - Codex: `~/.codex/sessions/**/*.jsonl` and `~/.codex/config.toml`.
 - Gemini CLI: `~/.gemini/tmp/**/chats/session-*.json` and `~/.gemini/settings.json`.
 - Antigravity: `~/.gemini/antigravity*/brain/**`, `<Orca data>/antigravity-chat/**`, and `<Orca data>/antigravity-accounts/*/**`.
-- Orca: `<Orca data>/agent-session-journal.db`, `<Orca data>/profiles/<active-profile>/profile-state.db`, and the runtime session directories under `<Orca data>/codex-runtime-home/` and `<Orca data>/codex-accounts/`.
+- Orca: `<Orca data>/agent-session-domain.db` (with `agent-session-journal.db` as a fallback), `<Orca data>/profiles/<active-profile>/profile-state.db`, and the runtime session directories under `<Orca data>/codex-runtime-home/` and `<Orca data>/codex-accounts/`.
 
 Token Pulse uses Orca's current official workspace and agent APIs for focus, status, terminal identity, and terminal focus, and invokes `orca account list --json` asynchronously (cached for 5 minutes) to read local rate-limit quota windows and pool usage across Codex, Antigravity, and Claude. Detailed per-turn usage and subagent history still come from the local agent transcripts because the current host does not expose an official session-history API.
 
@@ -79,13 +92,15 @@ The plugin requires Orca `>=1.4.248`.
 
 ## Releases
 
-Release a new version with:
+Pass the next unused version to the release script. For example:
 
 ```bash
-scripts/publish-plugin.sh 0.1.5
+scripts/publish-plugin.sh 0.1.7
 ```
 
-The script updates the manifest version, validates and tests the plugin, commits the release, pushes `main`, creates the matching `v0.1.5` tag, and prints the Orca directory URL.
+The script updates the manifest, validates and tests the plugin, and pushes `main`
+and the matching version tag. Orca indexes the tag separately. Verify the listed
+version and commit in the [community catalog](https://github.com/stablyai/orca-community-plugins/blob/main/orca-catalog.json).
 
 ## License
 
