@@ -444,7 +444,11 @@ export class TranscriptScanner {
         }
       }
 
-      const st = createEmptySessionState(item.sessionId, item.agent, filePath)
+      // Older caches can carry the parent's ID in a Codex child's summary.
+      const sessionId = item.agent === 'codex' && item.isSubagent && item.sessionId === item.parentSessionId
+        ? extractCodexUuidFromFilename(filePath)
+        : item.sessionId
+      const st = createEmptySessionState(sessionId, item.agent, filePath)
       st.offsetBytes = item.sizeBytes
       st.lastSizeBytes = item.sizeBytes
       st.lastMtimeMs = item.mtimeMs

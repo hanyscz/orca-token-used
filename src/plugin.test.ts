@@ -3114,6 +3114,11 @@ describe('Readable Subagent Titles & Metadata Wiring', () => {
         }
       }),
       JSON.stringify({
+        timestamp: new Date(now - 11_000).toISOString(),
+        type: 'session_meta',
+        payload: { id: 'codex-parent-1', cwd: wtPath, source: 'vscode' }
+      }),
+      JSON.stringify({
         timestamp: new Date(now - 9_000).toISOString(),
         type: 'turn_context',
         payload: { cwd: wtPath, model: 'gpt-6.1-sol' }
@@ -3157,6 +3162,7 @@ describe('Readable Subagent Titles & Metadata Wiring', () => {
       (c) => c.sessionKey === 'codex:019a0c6d-1111-2222-3333-444455556666'
     )
     assert.equal(subCard?.title, 'premortem_merge · Linnaeus')
+    assert.equal(subCard?.parentSessionKey, parentCard?.sessionKey)
   })
 
   test('Claude subagent displays parent Task/Agent description + subagent_type, works when parent is outside hotRaw, and falls back to .meta.json agentType when parent is absent', () => {
