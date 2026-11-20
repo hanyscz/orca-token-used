@@ -2,6 +2,7 @@
 // strictly with zero npm dependencies (`node_modules` free).
 
 declare const process: {
+  readonly execPath: string
   readonly platform: string
   readonly env: Record<string, string | undefined>
 }
@@ -83,6 +84,7 @@ declare module 'node:os' {
 }
 
 declare module 'node:path' {
+  export const win32: { dirname: typeof dirname; join: typeof join }
   export const sep: string
   export function join(...paths: string[]): string
   export function resolve(...paths: string[]): string

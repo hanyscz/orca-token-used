@@ -1,12 +1,21 @@
 import { execFile } from 'node:child_process'
 import fs from 'node:fs'
+import { win32 } from 'node:path'
 import { cleanConversationTitle, isGenericTerminalTabLabel } from './journal'
 
 const MAC_ORCA_BIN = '/Applications/Orca.app/Contents/Resources/bin/orca'
 
-function resolveOrcaExecutable(): string {
-  if (process.env.ORCA_BIN && process.env.ORCA_BIN.trim()) {
-    return process.env.ORCA_BIN.trim()
+export function resolveOrcaExecutable(
+  override = process.env.ORCA_BIN,
+  platform = process.platform,
+  execPath = process.execPath
+): string {
+  if (override?.trim()) {
+    return override.trim()
+  }
+  if (platform === 'win32') {
+    // Orca forks trusted workers with its desktop executable.
+    return win32.join(win32.dirname(execPath), 'resources', 'bin', 'orca.exe')
   }
   return 'orca'
 }

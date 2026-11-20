@@ -1,5 +1,5 @@
 import { assert, test } from 'orca/testing'
-import { parseOrcaTabTitles } from './orca-cli'
+import { parseOrcaTabTitles, resolveOrcaExecutable } from './orca-cli'
 
 test('joins custom tab labels to their exact connected terminal handles', () => {
   const pane = (handle: string, tabId: string, connected = true) => ({
@@ -25,4 +25,12 @@ test('joins custom tab labels to their exact connected terminal handles', () => 
     ['term-a', '#64'], ['term-b1', '#66'], ['term-b2', '#66']
   ])
   assert.equal(parseOrcaTabTitles({ ok: false }).size, 0)
+})
+
+test('selects the bundled Windows CLI even when the desktop exe has the same name', () => {
+  const desktop = String.raw`D:\Orca Preview\Orca.exe`
+  const cli = String.raw`D:\Orca Preview\resources\bin\orca.exe`
+  assert.equal(resolveOrcaExecutable('', 'win32', desktop), cli)
+  assert.equal(resolveOrcaExecutable(' custom-cli ', 'win32', desktop), 'custom-cli')
+  assert.equal(resolveOrcaExecutable('', 'darwin', desktop), 'orca')
 })
