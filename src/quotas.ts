@@ -1,5 +1,4 @@
-import { execFile } from 'node:child_process'
-import fs from 'node:fs'
+import { runOrcaJson } from './orca-cli'
 import type { SessionTranscriptState } from './parsers'
 import type { PricingEngine } from './pricing'
 import type {
@@ -20,7 +19,6 @@ export const DEFAULT_QUOTA_TIMEOUT_MS = 15_000
 
 const FIVE_HOURS_MS = 5 * 3600_000
 const SEVEN_DAYS_MS = 7 * 86400_000
-const MAC_ORCA_BIN = '/Applications/Orca.app/Contents/Resources/bin/orca'
 
 export const QUOTA_PROVIDERS: readonly QuotaProviderKind[] = ['codex', 'antigravity', 'claude']
 
@@ -537,61 +535,6 @@ export function computeLocalRollingUsage(
   return out
 }
 
-function resolveOrcaExecutable(): string {
-  if (process.env.ORCA_BIN && process.env.ORCA_BIN.trim()) {
-    return process.env.ORCA_BIN.trim()
-  }
-  return 'orca'
-}
-
-function execFileJson(bin: string, signal: AbortSignal, timeoutMs: number): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      bin,
-      ['account', 'list', '--json'],
-      {
-        timeout: timeoutMs,
-        maxBuffer: 4 * 1024 * 1024,
-        signal,
-        killSignal: 'SIGTERM'
-      },
-      (err, stdout) => {
-        if (err) {
-          reject(err)
-          return
-        }
-        try {
-          resolve(JSON.parse(stdout))
-        } catch (parseErr) {
-          reject(
-            new Error(
-              `Invalid JSON from orca account list: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`
-            )
-          )
-        }
-      }
-    )
-  })
-}
-
-async function defaultExecQuotaCli(signal: AbortSignal, timeoutMs: number): Promise<unknown> {
-  const primary = resolveOrcaExecutable()
-  try {
-    return await execFileJson(primary, signal, timeoutMs)
-  } catch (err) {
-    const code = (err as { code?: string } | null)?.code
-    if (
-      code === 'ENOENT' &&
-      primary === 'orca' &&
-      process.platform === 'darwin' &&
-      fs.existsSync(MAC_ORCA_BIN)
-    ) {
-      return await execFileJson(MAC_ORCA_BIN, signal, timeoutMs)
-    }
-    throw err
-  }
-}
-
 function sanitizeCachedPools(raw: unknown): QuotaPool[] {
   if (!Array.isArray(raw)) return []
   const out: QuotaPool[] = []
@@ -658,7 +601,7 @@ export class QuotaEngine {
     this.ttlMs = Math.max(1000, options?.ttlMs ?? DEFAULT_QUOTA_TTL_MS)
     this.timeoutMs = Math.max(1000, options?.timeoutMs ?? DEFAULT_QUOTA_TIMEOUT_MS)
     this.execCli =
-      options?.execCli ?? ((signal) => defaultExecQuotaCli(signal, this.timeoutMs))
+      options?.execCli ?? ((signal) => runOrcaJson(['account', 'list', '--json'], signal, this.timeoutMs))
     this.nowFn = options?.nowFn ?? (() => Date.now())
   }
 

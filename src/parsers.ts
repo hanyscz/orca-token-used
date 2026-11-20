@@ -636,13 +636,18 @@ export function applyCodexLines(state: SessionTranscriptState, lines: string[]):
       continue
     }
 
-    const tsMs = parseIsoMs(obj.timestamp)
-    touchTimestamps(state, tsMs)
-
     const topType = obj.type
     const payload = (obj.payload && typeof obj.payload === 'object'
       ? obj.payload
       : {}) as Record<string, unknown>
+    const metaId = topType === 'session_meta'
+      ? cleanNonEmptyString(payload.id) ?? cleanNonEmptyString(payload.session_id)
+      : undefined
+    // Forked rollouts can include the parent's session header after their own.
+    if (metaId && state.isSubagent && metaId === state.parentSessionId) continue
+
+    const tsMs = parseIsoMs(obj.timestamp)
+    touchTimestamps(state, tsMs)
     recordReasoningLevelFromObject(state, obj)
     recordReasoningLevelFromObject(state, payload)
 
@@ -650,11 +655,7 @@ export function applyCodexLines(state: SessionTranscriptState, lines: string[]):
       if (typeof payload.cwd === 'string' && payload.cwd.trim()) {
         state.cwd = payload.cwd.trim()
       }
-      if (typeof payload.id === 'string' && payload.id.trim()) {
-        state.sessionId = payload.id.trim()
-      } else if (typeof payload.session_id === 'string' && payload.session_id.trim()) {
-        state.sessionId = payload.session_id.trim()
-      }
+      if (metaId) state.sessionId = metaId
       const source = payload.source as
         | { kind?: unknown; subagent?: unknown }
         | string

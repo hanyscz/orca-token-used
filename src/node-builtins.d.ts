@@ -86,6 +86,8 @@ declare module 'node:path' {
   export const sep: string
   export function join(...paths: string[]): string
   export function resolve(...paths: string[]): string
+  export function relative(from: string, to: string): string
+  export function isAbsolute(path: string): boolean
   export function basename(path: string, suffix?: string): string
   export function extname(path: string): string
   export function dirname(path: string): string
@@ -93,6 +95,8 @@ declare module 'node:path' {
     sep: string
     join: typeof join
     resolve: typeof resolve
+    relative: typeof relative
+    isAbsolute: typeof isAbsolute
     basename: typeof basename
     extname: typeof extname
     dirname: typeof dirname
@@ -114,6 +118,20 @@ declare module 'node:crypto' {
 
 declare module 'node:module' {
   export function createRequire(filename: string | URL): (id: string) => unknown
+}
+
+declare module 'node:child_process' {
+  export function execFile(
+    file: string,
+    args: readonly string[],
+    options: { timeout?: number; maxBuffer?: number; signal?: AbortSignal; killSignal?: string },
+    callback: (error: Error | null, stdout: string, stderr: string) => void
+  ): unknown
+  export function execFileSync(
+    file: string,
+    args: readonly string[],
+    options?: { env?: Record<string, string | undefined>; stdio?: 'pipe' | 'inherit' }
+  ): Buffer
 }
 
 declare module 'node:test' {

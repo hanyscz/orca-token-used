@@ -33,7 +33,7 @@
     }
   ],
   "engines": {
-    "orca": ">=1.4.248"
+    "orca": ">=1.4.259"
   },
   "pluginApi": 1,
   "main": "src/worker.ts",
@@ -108,6 +108,9 @@
     },
     {
       "kind": "agent:read"
+    },
+    {
+      "kind": "history:read"
     },
     {
       "kind": "storage:own"

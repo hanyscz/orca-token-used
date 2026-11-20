@@ -7,7 +7,6 @@ import type { AgentKind } from './protocol'
 
 interface SqliteStatement {
   all(): Array<Record<string, unknown>>
-  get(): Record<string, unknown> | undefined
 }
 
 interface SqliteReadOnlyDb {
@@ -21,41 +20,11 @@ type SqliteDbConstructor = new (
 ) => SqliteReadOnlyDb
 
 export interface JournalSessionMeta {
-  orcaSessionId: string
-  nativeId: string
   provider: AgentKind
   title: string | null
   workspacePath: string | null
   model: string | null
   updatedAt: number
-  turnUpdatedAt?: number
-  isLiveLease: boolean
-  isTurnOpen: boolean
-  lastTurnState?: 'open' | 'settled' | null
-}
-
-export type TerminalTabTitleSource = 'custom' | 'generated' | 'label' | null
-
-export interface TerminalTabTitleOverride {
-  ptyId: string
-  workspacePath: string
-  agent: AgentKind | null
-  customTitle: string
-  createdAt: number
-  lastFocusedAt: number
-}
-
-export interface TerminalTabMeta {
-  ptyId: string
-  tabId: string
-  workspacePath: string
-  agent: AgentKind | null
-  effectiveTitle: string | null
-  titleSource: TerminalTabTitleSource
-  rawTabLabel: string | null
-  createdAt: number
-  lastFocusedAt: number
-  isOpenInUnifiedTabs: boolean
 }
 
 export interface AntigravityConversationSummaryMeta {
@@ -78,16 +47,7 @@ export interface AntigravityHistoryEntry {
 
 export interface JournalIndex {
   byNativeId: Map<string, JournalSessionMeta>
-  byOrcaSessionId: Map<string, JournalSessionMeta>
   accountHomes: Map<AgentKind, Set<string>>
-  /** Latest observed live/recent activity timestamp per workspacePath */
-  workspaceActivityMs: Map<string, number>
-  /** Non-generic terminal tab titles keyed by ptyId, tabId, and `pty:<ptyId>` */
-  ptyCustomTitles?: Map<string, string>
-  /** Active PTY terminal tabs with user-defined/generated title (legacy override shape) */
-  terminalTabOverrides?: TerminalTabTitleOverride[]
-  /** All discovered Orca terminal tabs (renamed, generated, and plain) */
-  terminalTabs?: TerminalTabMeta[]
   /** Authoritative Antigravity workspace paths, titles, and subagent flags from conversation_summaries.db */
   antigravitySummaries?: Map<string, AntigravityConversationSummaryMeta>
   /** Explicit conversationId -> workspacePath mappings from history.jsonl */
@@ -96,12 +56,6 @@ export interface JournalIndex {
   antigravityHistoryEntries?: AntigravityHistoryEntry[]
   /** Configured default model slugs read from local CLI settings (`agy`, `codex`, `claude`, `gemini`) */
   cliConfiguredModels?: Partial<Record<AgentKind, string>>
-}
-
-export interface OrcaActiveWorktreeSelection {
-  activeRepoId: string | null
-  activeWorktreeId: string | null
-  activeWorktreePath: string | null
 }
 
 function loadSqliteConstructor(): SqliteDbConstructor | null {
@@ -163,196 +117,6 @@ export function defaultOrcaAppDataDirs(homeDir = os.homedir()): string[] {
   return uniqueDirs
 }
 
-export function extractWorkspacePathFromId(workspaceId: unknown): string | null {
-  if (typeof workspaceId !== 'string' || !workspaceId) return null
-  const withoutPtySuffix = workspaceId.includes('@@')
-    ? workspaceId.slice(0, workspaceId.indexOf('@@'))
-    : workspaceId
-  const sepIdx = withoutPtySuffix.indexOf('::')
-  const candidate = sepIdx >= 0 ? withoutPtySuffix.slice(sepIdx + 2) : withoutPtySuffix
-  return candidate.startsWith('/') || /^[A-Za-z]:[\\/]/.test(candidate) ? candidate : null
-}
-
-function listCandidateProfileStateDbs(orcaDir: string): string[] {
-  let profileId = 'local-default'
-  const indexPath = path.join(orcaDir, 'orca-profile-index.json')
-  try {
-    if (fs.existsSync(indexPath)) {
-      const idx = JSON.parse(fs.readFileSync(indexPath, 'utf8')) as {
-        activeProfileId?: unknown
-      }
-      if (typeof idx?.activeProfileId === 'string' && idx.activeProfileId.trim()) {
-        profileId = idx.activeProfileId.trim()
-      }
-    }
-  } catch {
-    // Fallback to local-default
-  }
-
-  if (path.basename(profileId) !== profileId || profileId === '.' || profileId === '..') {
-    profileId = 'local-default'
-  }
-
-  // Read only the active profile. Other profiles may contain unrelated user data.
-  return [path.join(orcaDir, 'profiles', profileId, 'profile-state.db')]
-}
-
-/**
- * Reads Orca's left-sidebar focused worktree (`workspaceSession.activeWorktreeId`) from the active
- * profile's `profile-state.db` strictly in `readOnly: true` mode (~0.5ms).
- * This resolves same-named worktrees across different Orca projects (`Project -> main`) with 100% accuracy.
- */
-export function readOrcaActiveWorktreeSelection(
-  orcaDirs = defaultOrcaAppDataDirs()
-): OrcaActiveWorktreeSelection {
-  const empty: OrcaActiveWorktreeSelection = {
-    activeRepoId: null,
-    activeWorktreeId: null,
-    activeWorktreePath: null
-  }
-
-  const DatabaseSyncCtor = loadSqliteConstructor()
-  if (!DatabaseSyncCtor) return empty
-
-  for (const orcaDir of orcaDirs) {
-    for (const dbPath of listCandidateProfileStateDbs(orcaDir)) {
-      if (!fs.existsSync(dbPath)) continue
-      let db: SqliteReadOnlyDb | null = null
-      try {
-        db = new DatabaseSyncCtor(dbPath, { readOnly: true, timeout: 300 })
-        const wtRow = db
-          .prepare(
-            "SELECT payload FROM profile_state_document_parts WHERE domain = 'workspaceSession' AND part_key = '[\"activeWorktreeId\"]' LIMIT 1"
-          )
-          .get()
-        const repoRow = db
-          .prepare(
-            "SELECT payload FROM profile_state_document_parts WHERE domain = 'workspaceSession' AND part_key = '[\"activeRepoId\"]' LIMIT 1"
-          )
-          .get()
-
-        const parsedWt =
-          typeof wtRow?.payload === 'string' ? (JSON.parse(wtRow.payload) as unknown) : null
-        const parsedRepo =
-          typeof repoRow?.payload === 'string' ? (JSON.parse(repoRow.payload) as unknown) : null
-
-        const activeWorktreeId =
-          typeof parsedWt === 'string' && parsedWt.trim() ? parsedWt.trim() : null
-        const activeRepoId =
-          typeof parsedRepo === 'string' && parsedRepo.trim() ? parsedRepo.trim() : null
-
-        if (activeWorktreeId || activeRepoId) {
-          return {
-            activeRepoId,
-            activeWorktreeId,
-            activeWorktreePath: extractWorkspacePathFromId(activeWorktreeId)
-          }
-        }
-      } catch {
-        // Ignore locked or uninitialized profile-state.db
-      } finally {
-        try {
-          db?.close()
-        } catch {
-          // Ignore close error
-        }
-      }
-    }
-  }
-
-  return empty
-}
-
-export function readProfileStateTerminalToTabId(
-  orcaDirs = defaultOrcaAppDataDirs()
-): Map<string, string> {
-  const map = new Map<string, string>()
-  const DatabaseSyncCtor = loadSqliteConstructor()
-  if (!DatabaseSyncCtor) return map
-
-  for (const orcaDir of orcaDirs) {
-    for (const dbPath of listCandidateProfileStateDbs(orcaDir)) {
-      if (!fs.existsSync(dbPath)) continue
-      let db: SqliteReadOnlyDb | null = null
-      try {
-        db = new DatabaseSyncCtor(dbPath, { readOnly: true, timeout: 300 })
-        const tabRows = db
-          .prepare(
-            "SELECT part_key, payload FROM profile_state_document_parts WHERE domain = 'workspaceSession' AND (part_key LIKE '[\"tabsByWorktree\",%' OR part_key LIKE '[\"unifiedTabs\",%')"
-          )
-          .all() as Array<{ part_key?: string; payload?: string }>
-
-        for (const r of tabRows) {
-          if (!r?.part_key || !r.payload) continue
-          let arr: unknown
-          try {
-            arr = JSON.parse(r.payload)
-          } catch {
-            continue
-          }
-          if (!Array.isArray(arr)) continue
-
-          if (r.part_key.startsWith('["unifiedTabs",')) {
-            for (const item of arr) {
-              if (!item || typeof item !== 'object') continue
-              const u = item as Record<string, unknown>
-              const tabId = typeof u.id === 'string' ? u.id.trim() : ''
-              const entityId = typeof u.entityId === 'string' ? u.entityId.trim() : ''
-              if (tabId) {
-                map.set(tabId, tabId)
-                if (entityId) map.set(entityId, tabId)
-              }
-            }
-          } else if (r.part_key.startsWith('["tabsByWorktree",')) {
-            for (const item of arr) {
-              if (!item || typeof item !== 'object') continue
-              const t = item as Record<string, unknown>
-              const tabId = typeof t.id === 'string' ? t.id.trim() : ''
-              const ptyId = typeof t.ptyId === 'string' ? t.ptyId.trim() : ''
-              const terminalId = typeof t.terminalId === 'string' ? t.terminalId.trim() : ''
-              if (tabId) {
-                map.set(tabId, tabId)
-                if (ptyId) map.set(ptyId, tabId)
-                if (terminalId) map.set(terminalId, tabId)
-                if (Array.isArray(t.terminals)) {
-                  for (const sub of t.terminals) {
-                    if (sub && typeof sub === 'object') {
-                      const stId =
-                        typeof (sub as { id?: unknown }).id === 'string'
-                          ? (sub as { id: string }).id.trim()
-                          : ''
-                      if (stId) map.set(stId, tabId)
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      } catch {
-        // Ignore locked or corrupt profile-state.db
-      } finally {
-        try {
-          db?.close()
-        } catch {
-          // Ignore close error
-        }
-      }
-    }
-  }
-
-  return map
-}
-
-function mapProviderToAgent(provider: unknown): AgentKind | null {
-  const p = String(provider || '').toLowerCase().trim()
-  if (p === 'claude' || p === 'claude-code') return 'claude'
-  if (p === 'codex' || p === 'openai-codex') return 'codex'
-  if (p === 'antigravity' || p === 'agy') return 'antigravity'
-  if (p === 'gemini' || p === 'gemini-cli') return 'gemini'
-  return null
-}
-
 export function inferAgentFromTerminalTitle(rawTitle: unknown): AgentKind | null {
   if (typeof rawTitle !== 'string') return null
   const t = rawTitle.trim().toLowerCase()
@@ -384,11 +148,6 @@ export function cleanAgentName(raw: unknown): string | null {
   const cleaned = raw.replace(/\s+/g, ' ').trim()
   if (!cleaned || RAW_UUID_PATTERN.test(cleaned)) return null
   return cleaned.slice(0, 120)
-}
-
-function isGenericChatTabLabel(label: string | null): boolean {
-  if (!label) return true
-  return /^(codex|claude|claude code|antigravity|gemini|agent|new)\s+chat$/i.test(label.trim())
 }
 
 /**
@@ -427,34 +186,6 @@ export function isGenericTerminalTabLabel(raw: unknown, defaultTitle?: unknown):
     return true
   }
   return false
-}
-
-/**
- * Sanitizes Orca's `generatedTitle` / `generatedLabel`, rescuing `Session: <name>` if a full
- * handoff header was captured and rejecting truncated boilerplate like `"Continue work from the prior Orca"`.
- */
-export function sanitizeTerminalGeneratedTitle(
-  raw: unknown,
-  defaultTitle?: unknown
-): string | null {
-  if (typeof raw !== 'string' || !raw.trim()) return null
-  let s = raw
-  const userReqMatch = s.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/i)
-  if (userReqMatch) {
-    s = userReqMatch[1]
-  }
-  if (/^\s*continue work from the prior orca\b/i.test(s)) {
-    const sessMatch = s.match(/Session:\s*([^\r\n]+)/i)
-    if (sessMatch?.[1]?.trim()) {
-      s = sessMatch[1].trim()
-    } else {
-      return null
-    }
-  }
-  s = s.replace(/<[^>]+>/g, ' ')
-  const cleaned = cleanConversationTitle(s)
-  if (!cleaned || isGenericTerminalTabLabel(cleaned, defaultTitle)) return null
-  return cleaned
 }
 
 /**
@@ -499,7 +230,8 @@ export function normalizeReasoningLevel(raw: unknown): string | null {
 
 function readLocalCliConfiguredModels(
   homeDir: string,
-  orcaDirs: string[]
+  orcaDirs: string[],
+  accountHomes: Map<AgentKind, Set<string>>
 ): Partial<Record<AgentKind, string>> {
   const out: Partial<Record<AgentKind, string>> = {}
 
@@ -517,6 +249,7 @@ function readLocalCliConfiguredModels(
 
   // 2) Codex CLI (`~/.codex/config.toml` or Orca `codex-runtime-home/home/config.toml`)
   const codexConfigs = [
+    ...Array.from(accountHomes.get('codex') ?? [], (home) => path.join(home, 'config.toml')),
     path.join(homeDir, '.codex', 'config.toml'),
     ...orcaDirs.map((d) => path.join(d, 'codex-runtime-home', 'home', 'config.toml'))
   ]
@@ -535,16 +268,21 @@ function readLocalCliConfiguredModels(
     }
   }
 
-  // 3) Claude Code (`~/.claude/settings.json`)
-  try {
-    const claudeSettingsPath = path.join(homeDir, '.claude', 'settings.json')
-    if (fs.existsSync(claudeSettingsPath)) {
+  // 3) Claude Code
+  const claudeHomes = [...(accountHomes.get('claude') ?? []), path.join(homeDir, '.claude')]
+  for (const claudeHome of claudeHomes) {
+    try {
+      const claudeSettingsPath = path.join(claudeHome, 'settings.json')
+      if (!fs.existsSync(claudeSettingsPath)) continue
       const parsed = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')) as { model?: unknown }
-      const m = normalizeConfiguredModelSlug(parsed?.model)
-      if (m) out.claude = m
+      const model = normalizeConfiguredModelSlug(parsed?.model)
+      if (model) {
+        out.claude = model
+        break
+      }
+    } catch {
+      // Try the default settings file.
     }
-  } catch {
-    // Ignore
   }
 
   // 4) Gemini CLI (`~/.gemini/settings.json`)
@@ -670,8 +408,7 @@ function decodeWorkspaceUris(
 
 function collectAntigravityDataDirs(
   homeDir: string,
-  orcaDirs: string[],
-  accountHomes: Set<string>
+  orcaDirs: string[]
 ): string[] {
   const rawDirs: string[] = [
     path.join(homeDir, '.gemini', 'antigravity-cli'),
@@ -695,12 +432,6 @@ function collectAntigravityDataDirs(
       // Ignore unreadable account dir
     }
   }
-  for (const h of accountHomes) {
-    rawDirs.push(h)
-    rawDirs.push(path.join(h, 'antigravity-cli'))
-    rawDirs.push(path.join(h, 'antigravity-acp'))
-  }
-
   const seenKeys = new Set<string>()
   const out: string[] = []
   for (const d of rawDirs) {
@@ -942,467 +673,41 @@ function readAntigravityMetadata(
   return { summaries, historyByConvId, historyEntries }
 }
 
-/**
- * Reads Orca's session records, `profile-state.db` tab headers, and local Antigravity
- * `conversation_summaries.db` / `history.jsonl` strictly in `readOnly: true` mode.
- */
+/** Reads agent-owned settings, summaries, and transcript metadata. */
 export function readOrcaJournalIndex(
   orcaDirs = defaultOrcaAppDataDirs(),
   homeDir = os.homedir(),
   extraKnownPaths?: Iterable<string>
 ): JournalIndex {
-  const byNativeId = new Map<string, JournalSessionMeta>()
-  const byOrcaSessionId = new Map<string, JournalSessionMeta>()
-  const workspaceActivityMs = new Map<string, number>()
-  const ptyCustomTitles = new Map<string, string>()
-  const terminalTabOverrides: TerminalTabTitleOverride[] = []
-  const terminalTabs: TerminalTabMeta[] = []
-  const cliConfiguredModels = readLocalCliConfiguredModels(homeDir, orcaDirs)
-  const accountHomes = new Map<AgentKind, Set<string>>([
-    ['claude', new Set()],
-    ['codex', new Set()],
-    ['antigravity', new Set()],
-    ['gemini', new Set()]
-  ])
-
-  const DatabaseSyncCtor = loadSqliteConstructor()
-  if (!DatabaseSyncCtor) {
-    const agDirs = collectAntigravityDataDirs(
-      homeDir,
-      orcaDirs,
-      accountHomes.get('antigravity')!
-    )
-    const agMeta = readAntigravityMetadata(agDirs, null, new Set())
-    return {
-      byNativeId,
-      byOrcaSessionId,
-      accountHomes,
-      workspaceActivityMs,
-      ptyCustomTitles,
-      terminalTabOverrides,
-      terminalTabs,
-      antigravitySummaries: agMeta.summaries,
-      antigravityHistoryByConversationId: agMeta.historyByConvId,
-      antigravityHistoryEntries: agMeta.historyEntries,
-      cliConfiguredModels
+  const accountHomes = new Map<AgentKind, Set<string>>()
+  for (const [agent, value] of [
+    ['claude', process.env.CLAUDE_CONFIG_DIR],
+    ['codex', process.env.CODEX_HOME]
+  ] as const) {
+    const home = value?.trim()
+    if (!home) continue
+    // An explicit scan home scopes discovery to that root, including configured provider homes.
+    if (path.resolve(homeDir) !== path.resolve(os.homedir())) {
+      const relative = path.relative(homeDir, home)
+      if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) continue
     }
-  }
-
-  for (const orcaDir of orcaDirs) {
-    for (const filename of ['agent-session-domain.db', 'agent-session-journal.db']) {
-      const dbPath = path.join(orcaDir, filename)
-      if (!fs.existsSync(dbPath)) continue
-      let db: SqliteReadOnlyDb | null = null
-      try {
-        db = new DatabaseSyncCtor(dbPath, { readOnly: true, timeout: 500 })
-        const rows = db
-          .prepare('SELECT session_id, record_json FROM agent_session_records')
-          .all() as Array<{ session_id?: string; record_json?: string }>
-
-        for (const row of rows) {
-          if (!row?.record_json || !row.session_id) continue
-          let parsed: Record<string, unknown>
-          try {
-            parsed = JSON.parse(row.record_json) as Record<string, unknown>
-          } catch {
-            continue
-          }
-
-          const agent = mapProviderToAgent(parsed.provider)
-          if (!agent) continue
-
-          const accHome = parsed.accountHome as { path?: unknown } | undefined
-          if (accHome && typeof accHome.path === 'string' && accHome.path.trim()) {
-            accountHomes.get(agent)?.add(accHome.path.trim())
-          }
-
-          const loc = parsed.location as { workspaceId?: unknown } | undefined
-          const launchDir =
-            typeof parsed.launchDirectory === 'string' ? parsed.launchDirectory.trim() : null
-          const workspacePath = extractWorkspacePathFromId(loc?.workspaceId) || launchDir || null
-          const opts = parsed.options as { model?: unknown } | undefined
-          const model = normalizeConfiguredModelSlug(opts?.model)
-          const title = cleanConversationTitle(parsed.conversationName)
-          const updatedAt = typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0
-
-          const lease = parsed.lease as
-            | { claimStatus?: unknown; lastRenewedAt?: unknown }
-            | null
-            | undefined
-          const isLiveLease = lease?.claimStatus === 'live'
-          const renewedAt = typeof lease?.lastRenewedAt === 'number' ? lease.lastRenewedAt : 0
-
-          const lastTurn = parsed.lastTurn as { state?: unknown; at?: unknown } | null | undefined
-          const rawTurnState =
-            typeof lastTurn?.state === 'string' ? lastTurn.state.toLowerCase().trim() : ''
-          const lastTurnState: 'open' | 'settled' | null =
-            rawTurnState === 'open' ? 'open' : rawTurnState === 'settled' ? 'settled' : null
-          const isTurnOpen = lastTurnState === 'open'
-          const turnAt = typeof lastTurn?.at === 'number' ? lastTurn.at : 0
-          const turnUpdatedAt = turnAt > 0 ? turnAt : isTurnOpen ? updatedAt : 0
-
-          const effectiveActivity = Math.max(updatedAt, renewedAt, turnAt)
-          if (workspacePath && effectiveActivity > 0) {
-            const score =
-              effectiveActivity + (isTurnOpen ? 10_000_000 : isLiveLease ? 1_000_000 : 0)
-            const prevScore = workspaceActivityMs.get(workspacePath) ?? 0
-            if (score > prevScore) {
-              workspaceActivityMs.set(workspacePath, score)
-            }
-          }
-
-          const chain = Array.isArray(parsed.providerHandleChain) ? parsed.providerHandleChain : []
-          const nativeIds = new Set<string>()
-          for (const item of chain) {
-            if (!item || typeof item !== 'object') continue
-            const handle = (item as { handle?: Record<string, unknown> }).handle
-            if (!handle || typeof handle !== 'object') continue
-            for (const key of ['sessionId', 'threadId', 'nativeId', 'id']) {
-              const val = handle[key]
-              if (typeof val === 'string' && val.trim()) {
-                nativeIds.add(val.trim())
-              }
-            }
-          }
-
-          const baseMeta: JournalSessionMeta = {
-            orcaSessionId: row.session_id,
-            nativeId: Array.from(nativeIds)[0] ?? row.session_id,
-            provider: agent,
-            title,
-            workspacePath,
-            model,
-            updatedAt: Math.max(updatedAt, renewedAt),
-            turnUpdatedAt,
-            isLiveLease,
-            isTurnOpen,
-            lastTurnState
-          }
-          byOrcaSessionId.set(row.session_id, baseMeta)
-
-          for (const nativeId of nativeIds) {
-            const existing = byNativeId.get(nativeId)
-            if (!existing || baseMeta.updatedAt >= existing.updatedAt) {
-              byNativeId.set(nativeId, {
-                ...baseMeta,
-                nativeId,
-                title: title || existing?.title || null,
-                workspacePath: workspacePath || existing?.workspacePath || null,
-                model: model || existing?.model || null
-              })
-            }
-          }
-        }
-        break
-      } catch {
-        // Fall back to the legacy store if the current store cannot be read.
-      } finally {
-        try {
-          db?.close()
-        } catch {
-          // Ignore close errors
-        }
-      }
-    }
-
-    // Read user-visible tab headers (`tabsByWorktree` + `unifiedTabs`) from `profile-state.db`
-    for (const profileDbPath of listCandidateProfileStateDbs(orcaDir)) {
-      if (!fs.existsSync(profileDbPath)) continue
-      let pDb: SqliteReadOnlyDb | null = null
-      try {
-        pDb = new DatabaseSyncCtor(profileDbPath, { readOnly: true, timeout: 300 })
-        const tabRows = pDb
-          .prepare(
-            "SELECT part_key, payload FROM profile_state_document_parts WHERE domain = 'workspaceSession' AND (part_key LIKE '[\"tabsByWorktree\",%' OR part_key LIKE '[\"unifiedTabs\",%')"
-          )
-          .all() as Array<{ part_key?: string; payload?: string }>
-
-        type UnifiedTerminalItem = {
-          id: string
-          entityId: string
-          worktreeId: string
-          customLabel: string | null
-          generatedLabel: string | null
-          label: string | null
-          lastFocusedAt: number
-          isExplicitTerminal: boolean
-        }
-        const unifiedTerminalMeta = new Map<string, UnifiedTerminalItem>()
-        const unifiedTerminalByEntity = new Map<string, UnifiedTerminalItem>()
-        const rawWorktreeTerminalTabs: Array<Record<string, unknown>> = []
-
-        for (const r of tabRows) {
-          if (!r?.part_key || !r.payload) continue
-          let arr: unknown
-          try {
-            arr = JSON.parse(r.payload)
-          } catch {
-            continue
-          }
-          if (!Array.isArray(arr)) continue
-
-          if (r.part_key.startsWith('["unifiedTabs",')) {
-            for (const item of arr) {
-              if (!item || typeof item !== 'object') continue
-              const u = item as Record<string, unknown>
-              const id = typeof u.id === 'string' ? u.id.trim() : ''
-              const contentType =
-                typeof u.contentType === 'string' ? u.contentType.trim() : undefined
-              const customLabel = cleanConversationTitle(u.customLabel)
-              const generatedLabel = sanitizeTerminalGeneratedTitle(u.generatedLabel)
-              const label = cleanConversationTitle(u.label)
-              const lastFocusedAt = typeof u.lastFocusedAt === 'number' ? u.lastFocusedAt : 0
-
-              if (
-                contentType === 'agent-session' ||
-                id.startsWith('structured-agent-session-')
-              ) {
-                const orcaSessId =
-                  typeof u.entityId === 'string' && u.entityId.trim()
-                    ? u.entityId.trim()
-                    : id.startsWith('structured-agent-session-')
-                      ? id.slice('structured-agent-session-'.length)
-                      : ''
-                const jEntry = orcaSessId ? byOrcaSessionId.get(orcaSessId) : undefined
-                const effectiveTitle =
-                  customLabel ||
-                  generatedLabel ||
-                  (!isGenericChatTabLabel(label) ? label : null)
-                if (jEntry && effectiveTitle) {
-                  if (customLabel || generatedLabel || !jEntry.title) {
-                    jEntry.title = effectiveTitle
-                    for (const natEntry of byNativeId.values()) {
-                      if (natEntry.orcaSessionId === orcaSessId) {
-                        natEntry.title = effectiveTitle
-                      }
-                    }
-                  }
-                }
-              } else if (
-                (contentType === 'terminal' || contentType === undefined) &&
-                id
-              ) {
-                const entityId =
-                  typeof u.entityId === 'string' && u.entityId.trim() ? u.entityId.trim() : ''
-                const worktreeId =
-                  typeof u.worktreeId === 'string' && u.worktreeId.trim()
-                    ? u.worktreeId.trim()
-                    : ''
-                const meta: UnifiedTerminalItem = {
-                  id,
-                  entityId,
-                  worktreeId,
-                  customLabel,
-                  generatedLabel,
-                  label,
-                  lastFocusedAt,
-                  isExplicitTerminal: contentType === 'terminal'
-                }
-                unifiedTerminalMeta.set(id, meta)
-                if (entityId) {
-                  unifiedTerminalByEntity.set(entityId, meta)
-                }
-              }
-            }
-          } else if (r.part_key.startsWith('["tabsByWorktree",')) {
-            for (const item of arr) {
-              if (item && typeof item === 'object') {
-                rawWorktreeTerminalTabs.push(item as Record<string, unknown>)
-              }
-            }
-          }
-        }
-
-        const matchedUnifiedIds = new Set<string>()
-        const worktreeIdToPath = new Map<string, string>()
-        const registerPtyTitleKeys = (ptyId: string, tabId: string, title: string) => {
-          if (ptyId) {
-            ptyCustomTitles.set(ptyId, title)
-            ptyCustomTitles.set(`pty:${ptyId}`, title)
-          }
-          if (tabId) {
-            ptyCustomTitles.set(tabId, title)
-          }
-        }
-
-        for (const t of rawWorktreeTerminalTabs) {
-          const tabId = typeof t.id === 'string' ? t.id.trim() : ''
-          const ptyId = typeof t.ptyId === 'string' ? t.ptyId.trim() : ''
-          const rawWtId = typeof t.worktreeId === 'string' ? t.worktreeId.trim() : ''
-          const uMeta =
-            (tabId ? unifiedTerminalMeta.get(tabId) : undefined) ??
-            (ptyId ? unifiedTerminalByEntity.get(ptyId) : undefined)
-          if (uMeta) matchedUnifiedIds.add(uMeta.id)
-
-          const defaultTitle = typeof t.defaultTitle === 'string' ? t.defaultTitle : null
-          const customPart = cleanConversationTitle(t.customTitle) || uMeta?.customLabel || null
-          const generatedPart =
-            sanitizeTerminalGeneratedTitle(t.generatedTitle, defaultTitle) ||
-            uMeta?.generatedLabel ||
-            null
-          const rawLabelCandidate = cleanConversationTitle(t.title) || uMeta?.label || null
-          const nonGenericLabel =
-            rawLabelCandidate && !isGenericTerminalTabLabel(rawLabelCandidate, defaultTitle)
-              ? rawLabelCandidate
-              : null
-
-          const effectiveTitle = customPart ?? generatedPart ?? nonGenericLabel ?? null
-          const titleSource: TerminalTabTitleSource = customPart
-            ? 'custom'
-            : generatedPart
-              ? 'generated'
-              : nonGenericLabel
-                ? 'label'
-                : null
-          const rawTabLabel =
-            uMeta?.label ||
-            cleanConversationTitle(t.title) ||
-            cleanConversationTitle(defaultTitle) ||
-            null
-
-          if (effectiveTitle) {
-            registerPtyTitleKeys(ptyId, tabId, effectiveTitle)
-          }
-
-          const wsPath =
-            extractWorkspacePathFromId(t.worktreeId) ||
-            extractWorkspacePathFromId(uMeta?.worktreeId) ||
-            (typeof t.startupCwd === 'string' && t.startupCwd.trim()
-              ? t.startupCwd.trim()
-              : null) ||
-            extractWorkspacePathFromId(ptyId)
-          if (wsPath && rawWtId) {
-            worktreeIdToPath.set(rawWtId, wsPath)
-          }
-          if (!wsPath || (!ptyId && !tabId)) continue
-
-          const agent =
-            mapProviderToAgent(t.launchAgent) ??
-            inferAgentFromTerminalTitle(t.title) ??
-            inferAgentFromTerminalTitle(uMeta?.label)
-          const createdAt = typeof t.createdAt === 'number' ? t.createdAt : 0
-          const lastFocusedAt = uMeta?.lastFocusedAt ?? createdAt
-
-          terminalTabs.push({
-            ptyId: ptyId || tabId,
-            tabId: tabId || ptyId,
-            workspacePath: wsPath,
-            agent,
-            effectiveTitle,
-            titleSource,
-            rawTabLabel,
-            createdAt,
-            lastFocusedAt,
-            isOpenInUnifiedTabs: uMeta !== undefined
-          })
-
-          if (effectiveTitle && ptyId) {
-            terminalTabOverrides.push({
-              ptyId,
-              workspacePath: wsPath,
-              agent,
-              customTitle: effectiveTitle,
-              createdAt,
-              lastFocusedAt
-            })
-          }
-        }
-
-        // Synthesize terminal tab entries for open `unifiedTabs` terminal items not yet flushed to `tabsByWorktree`
-        for (const uMeta of unifiedTerminalMeta.values()) {
-          if (!uMeta.isExplicitTerminal || matchedUnifiedIds.has(uMeta.id)) continue
-          const ptyId = uMeta.entityId || uMeta.id
-          const tabId = uMeta.id
-          const nonGenericLabel =
-            uMeta.label && !isGenericTerminalTabLabel(uMeta.label) ? uMeta.label : null
-          const effectiveTitle = uMeta.customLabel ?? uMeta.generatedLabel ?? nonGenericLabel ?? null
-          const titleSource: TerminalTabTitleSource = uMeta.customLabel
-            ? 'custom'
-            : uMeta.generatedLabel
-              ? 'generated'
-              : nonGenericLabel
-                ? 'label'
-                : null
-          if (effectiveTitle) {
-            registerPtyTitleKeys(ptyId, tabId, effectiveTitle)
-          }
-          const wsPath =
-            (uMeta.worktreeId ? worktreeIdToPath.get(uMeta.worktreeId) : undefined) ||
-            extractWorkspacePathFromId(uMeta.worktreeId) ||
-            extractWorkspacePathFromId(ptyId)
-          if (!wsPath) continue
-          const agent = inferAgentFromTerminalTitle(uMeta.label)
-          terminalTabs.push({
-            ptyId,
-            tabId,
-            workspacePath: wsPath,
-            agent,
-            effectiveTitle,
-            titleSource,
-            rawTabLabel: uMeta.label,
-            createdAt: 0,
-            lastFocusedAt: uMeta.lastFocusedAt,
-            isOpenInUnifiedTabs: true
-          })
-          if (effectiveTitle && ptyId) {
-            terminalTabOverrides.push({
-              ptyId,
-              workspacePath: wsPath,
-              agent,
-              customTitle: effectiveTitle,
-              createdAt: 0,
-              lastFocusedAt: uMeta.lastFocusedAt
-            })
-          }
-        }
-        break
-      } catch {
-        // Ignore locked profile-state.db
-      } finally {
-        try {
-          pDb?.close()
-        } catch {
-          // Ignore close error
-        }
-      }
-    }
+    accountHomes.set(agent, new Set([home]))
   }
 
   const preferredNormPaths = new Set<string>()
-  if (extraKnownPaths) {
-    for (const kp of extraKnownPaths) {
-      if (kp) preferredNormPaths.add(normalizePathForMatch(kp))
-    }
-  }
-  for (const jm of byOrcaSessionId.values()) {
-    if (jm.workspacePath) preferredNormPaths.add(normalizePathForMatch(jm.workspacePath))
-  }
-  for (const tt of terminalTabs) {
-    if (tt.workspacePath) preferredNormPaths.add(normalizePathForMatch(tt.workspacePath))
-  }
-  for (const wp of workspaceActivityMs.keys()) {
-    if (wp) preferredNormPaths.add(normalizePathForMatch(wp))
+  for (const kp of extraKnownPaths ?? []) {
+    if (kp) preferredNormPaths.add(normalizePathForMatch(kp))
   }
   preferredNormPaths.delete('')
 
-  const agDirs = collectAntigravityDataDirs(
-    homeDir,
-    orcaDirs,
-    accountHomes.get('antigravity')!
-  )
-  const agMeta = readAntigravityMetadata(agDirs, DatabaseSyncCtor, preferredNormPaths)
-
+  const agDirs = collectAntigravityDataDirs(homeDir, orcaDirs)
+  const agMeta = readAntigravityMetadata(agDirs, loadSqliteConstructor(), preferredNormPaths)
   return {
-    byNativeId,
-    byOrcaSessionId,
+    byNativeId: new Map(),
     accountHomes,
-    workspaceActivityMs,
-    ptyCustomTitles,
-    terminalTabOverrides,
-    terminalTabs,
     antigravitySummaries: agMeta.summaries,
     antigravityHistoryByConversationId: agMeta.historyByConvId,
     antigravityHistoryEntries: agMeta.historyEntries,
-    cliConfiguredModels
+    cliConfiguredModels: readLocalCliConfiguredModels(homeDir, orcaDirs, accountHomes)
   }
 }
