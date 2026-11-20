@@ -75,7 +75,9 @@ terminal layout and matches them by terminal handle. Custom Codex and Claude
 homes are discovered through `CODEX_HOME` and `CLAUDE_CONFIG_DIR` when those
 variables are available to the plugin worker.
 To read quota windows and pool usage, Token Pulse also runs
-`orca account list --json` with a five-minute cache.
+`orca account list --json` with a five-minute cache. On Windows, it uses Orca's
+bundled CLI unless `ORCA_BIN` is set. If the worker has neither `APPDATA` nor
+`ORCA_USER_DATA_PATH`, the CLI uses the user's default roaming app data folder.
 
 The settings files are parsed only for model and account-home metadata. Token Pulse uses local paths and `orca account list --json` output internally to display quotas and match sessions, and does not modify accounts or transmit credentials, emails, prompts, responses, transcript contents, or local paths.
 
@@ -105,15 +107,17 @@ The plugin requires Orca `>=1.4.259`.
 
 ## Releases
 
-Pass the next unused version to the release script. For example:
+Pass the next unused version to the release script. Add `--dry-run` to preview
+the release without publishing it.
 
-```bash
-scripts/publish-plugin.sh 0.1.7
+```text
+scripts/publish-plugin.sh <version> [--dry-run]
 ```
 
-The script updates the manifest, validates and tests the plugin, and pushes `main`
-and the matching version tag. Orca indexes the tag separately. Verify the listed
-version and commit in the [community catalog](https://github.com/stablyai/orca-community-plugins/blob/main/orca-catalog.json).
+The script updates the manifest, validates and tests the plugin, and pushes
+`main` and the matching `vX.Y.Z` tag. Orca automatically checks new tags on
+public repositories with the `orca-plugin` topic. After publishing, verify the
+listed version and commit in the [community catalog](https://github.com/stablyai/orca-community-plugins/blob/main/orca-catalog.json).
 
 ## License
 
