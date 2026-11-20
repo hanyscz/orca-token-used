@@ -2,6 +2,12 @@
 
 All notable changes to Token Pulse are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Czech (`cs`) localization of the panel UI.
+
 ## [0.1.7] - 2026-11-20
 
 - Use Orca's public workspace, agent, terminal, and history APIs for session
