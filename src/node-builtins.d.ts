@@ -126,7 +126,13 @@ declare module 'node:child_process' {
   export function execFile(
     file: string,
     args: readonly string[],
-    options: { timeout?: number; maxBuffer?: number; signal?: AbortSignal; killSignal?: string },
+    options: {
+      timeout?: number
+      maxBuffer?: number
+      signal?: AbortSignal
+      killSignal?: string
+      env?: Record<string, string | undefined>
+    },
     callback: (error: Error | null, stdout: string, stderr: string) => void
   ): unknown
   export function execFileSync(

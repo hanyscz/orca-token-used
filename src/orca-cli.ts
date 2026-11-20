@@ -1,9 +1,22 @@
 import { execFile } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import { win32 } from 'node:path'
 import { cleanConversationTitle, isGenericTerminalTabLabel } from './journal'
 
 const MAC_ORCA_BIN = '/Applications/Orca.app/Contents/Resources/bin/orca'
+
+function buildOrcaCliEnv(): Record<string, string | undefined> {
+  if (process.platform !== 'win32') return process.env
+  const hasUserDataPath = Boolean(process.env.ORCA_USER_DATA_PATH?.trim())
+  const hasAppData = Object.entries(process.env).some(
+    ([key, value]) => key.toUpperCase() === 'APPDATA' && Boolean(value?.trim())
+  )
+  if (hasUserDataPath || hasAppData) return process.env
+  const home = os.homedir().trim() || process.env.USERPROFILE?.trim() || process.env.HOME?.trim()
+  if (!home) return process.env
+  return { ...process.env, APPDATA: win32.join(home, 'AppData', 'Roaming') }
+}
 
 export function resolveOrcaExecutable(
   override = process.env.ORCA_BIN,
@@ -29,7 +42,8 @@ function execFileJson(bin: string, args: readonly string[], signal: AbortSignal,
         timeout: timeoutMs,
         maxBuffer: 4 * 1024 * 1024,
         signal,
-        killSignal: 'SIGTERM'
+        killSignal: 'SIGTERM',
+        env: buildOrcaCliEnv()
       },
       (err, stdout) => {
         if (err) {
