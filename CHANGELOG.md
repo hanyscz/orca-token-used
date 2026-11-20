@@ -2,11 +2,13 @@
 
 All notable changes to Token Pulse are documented in this file.
 
-## Unreleased
+## [0.1.7] - 2026-11-20
 
 - Use Orca's public workspace, agent, terminal, and history APIs for session
   metadata. Live rates, subagents, and costs continue to use local agent records.
 - Require Orca 1.4.259 or later for `history:read`.
+- Keep Codex subagents listed separately when their records include a parent
+  session header.
 
 ## [0.1.6] - 2026-11-19
 
