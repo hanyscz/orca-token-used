@@ -2,11 +2,13 @@
 
 All notable changes to Token Pulse are documented in this file.
 
-## [Unreleased]
+## [0.1.8] - 2026-11-20
 
-### Added
+### Fixed
 
-- Czech (`cs`) localization of the panel UI.
+- Restore Windows quota readings for Codex, Antigravity, and Claude by using
+  Orca's bundled CLI and supplying the default Orca data directory when the
+  worker has neither `APPDATA` nor `ORCA_USER_DATA_PATH`.
 
 ## [0.1.7] - 2026-11-20
 
