@@ -2,6 +2,17 @@
 
 All notable changes to Token Pulse are documented in this file.
 
+## [0.2.1] - 2026-11-23
+
+### Added
+
+- **Parent & subagent squad trains in Live Race**: Grouped each active parent session and its active child subagents into a single family formation on the Live Race track — children inherit their parent's species and palette with distinct accessories, trail behind the parent as up to 3 mini ducklings (with a `+N` overflow badge), race by combined squad TPS, and keep matching mini avatars on subagent cards. Active orphan subagents remain visible as standalone mini racers.
+- **Full 6-locale i18n coverage (including Czech `cs`)**: Localized all Live Race strings (`LIVE RACE`, thinking/waiting counters, subagent tooltip labels) and status-bar quota tooltip labels across `zh-TW`, `zh-CN`, `en`, `ja`, `ko`, and `cs`, with automated key-parity tests across all 6 locales.
+
+### Fixed
+
+- **Quotas multi-account row overflow**: Stacked the account email/active badge above a wrapped pool summary inside `.tp-quota-account-row` so long multi-pool quota lines (and longer localized labels such as Czech `Neuplatňuje se`) never clip or overflow past the card border.
+
 ## [0.2.0] - 2026-11-23
 
 ### Added

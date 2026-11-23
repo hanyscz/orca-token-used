@@ -15,7 +15,7 @@ The plugin uses Orca's `trusted-worker` profile. Orca will show the requested ac
 ## Features
 
 - Compact 4-tab navigation (**Live**, **Sessions**, **Stats** with Today/Week/Month switcher, and **Quotas**) with a sticky tab bar and sticky Live KPI header while scrolling.
-- Shared **Live Race** track showing active runtime sessions with deterministic, collision-free SVG mascots (up to 384 unique animal/palette/accessory combinations), speed leader crown, state indicators, and click-to-focus navigation.
+- Shared **Live Race** track grouping each active parent session and its child subagents into a family squad train (same species and palette, distinct accessories, up to 3 mini subagent ducklings + `+N` overflow badge, racing by combined squad TPS) with click-to-focus navigation and full 6-locale labels.
 - Live output and input token rates with 60-second waveforms and inline back navigation.
 - Session, day, week, and month token summaries with **Agent**, **Model**, and **Project** breakdowns, plus today's cumulative cost in the live dashboard.
 - Inline **Cache hit rate** (`Cache XX%`, highlighted below 50%) across Live cards, Live I/O detail, Sessions history, and Stats summaries.
