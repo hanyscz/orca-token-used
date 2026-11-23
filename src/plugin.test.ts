@@ -22,6 +22,7 @@ import {
   renderDashboardShellHtml,
   renderIoWaveformSvg
 } from './panel/app'
+import { assignSessionMascots } from './panel/race'
 import { formatTokens, formatUsd, getMessages, resolveLocale } from './panel/i18n'
 import {
   applyAntigravityLines,
@@ -3991,4 +3992,72 @@ test('renderDashboardShellHtml merges orphan subagents into the same status grou
   assert.ok(html.includes('tp-subagent-orphans'))
   assert.ok(html.includes('Orphan Subagent 1'))
   assert.ok(html.includes('Done Root 1'))
+})
+
+test('assignSessionMascots guarantees unique species (<=8), species+palette (<=64), and full signatures (<=384) deterministically', () => {
+  const keys8 = Array.from({ length: 8 }, (_, i) => `antigravity:session-${i}`)
+  const map8 = assignSessionMascots(keys8)
+  const map8Reversed = assignSessionMascots([...keys8].reverse())
+  assert.equal(new Set([...map8.values()].map((m) => m.species)).size, 8)
+  for (const key of keys8) {
+    assert.equal(map8.get(key)?.signature, map8Reversed.get(key)?.signature)
+  }
+
+  const keys24 = Array.from({ length: 24 }, (_, i) => `antigravity:concurrent-${i}`)
+  const map24 = assignSessionMascots(keys24)
+  assert.equal(new Set([...map24.values()].map((m) => `${m.species}:${m.palette.id}`)).size, 24)
+
+  const keys80 = Array.from({ length: 80 }, (_, i) => `antigravity:swarm-${i}`)
+  const map80 = assignSessionMascots(keys80)
+  assert.equal(new Set([...map80.values()].map((m) => m.signature)).size, 80)
+})
+
+test('renderDashboardShellHtml renders shared session race track only for active sessions and escapes titles', () => {
+  const now = Date.now()
+  const snap = createQuotaTestSnapshot(undefined, now)
+  const makeAgent = (
+    key: string,
+    state: DashboardSnapshot['live']['agents'][number]['state'],
+    title: string,
+    liveOutRate: number
+  ): DashboardSnapshot['live']['agents'][number] => ({
+    id: key,
+    sessionKey: key,
+    title,
+    agent: 'antigravity',
+    state,
+    terminalId: null,
+    providerLabel: 'Google',
+    modelLabel: 'gemini-4-neon',
+    projectName: 'proj',
+    workspaceName: 'main',
+    workspacePath: '/tmp/proj',
+    updatedAt: now,
+    liveOutRate,
+    tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150, costUsd: 0.01 },
+    tps: { avgTps: 10, peakTps: 20, liveTps: liveOutRate },
+    sparkline: [0, liveOutRate],
+    io: { outSeries: [0], inSeries: [0], liveOutRate, liveInRate: 0, peakOutRate: liveOutRate, peakInRate: 0 }
+  })
+
+  snap.live.agents = [
+    makeAgent('antigravity:s1', 'working', 'Fast <script>alert(1)</script>', 140),
+    makeAgent('antigravity:s2', 'waiting', 'Waiting session', 0),
+    makeAgent('antigravity:s3', 'done', 'Finished session', 0)
+  ]
+  snap.live.subagents = []
+
+  const html = renderDashboardShellHtml({ snap, tab: 'live', scope: 'all', locale: 'en', nowMs: now })
+  assert.ok(html.includes('class="tp-race-card"'))
+  assert.equal((html.match(/data-race-agent-key="/g) ?? []).length, 2)
+  assert.ok(html.includes('data-race-agent-key="antigravity:s1"'))
+  assert.ok(html.includes('data-race-agent-key="antigravity:s2"'))
+  assert.ok(!html.includes('data-race-agent-key="antigravity:s3"'))
+  assert.ok(html.includes('class="tp-racer-avatar"'))
+  assert.ok(!html.includes('<script>alert(1)</script>'))
+
+  // When all sessions are done, race track should not render
+  snap.live.agents = [makeAgent('antigravity:s3', 'done', 'Finished session', 0)]
+  const idleHtml = renderDashboardShellHtml({ snap, tab: 'live', scope: 'all', locale: 'en', nowMs: now })
+  assert.ok(!idleHtml.includes('class="tp-race-card"'))
 })

@@ -1,4 +1,5 @@
 import type {} from 'orca/frame'
+import { assignSessionMascots, renderMascotSvg, renderSessionRaceTrackHtml } from './race'
 import type {
   AgentKind,
   AgentRunState,
@@ -562,6 +563,16 @@ function renderLiveView(
   const { tokens, tps, agents, subagents = [] } = snap.live
   const todayCost = snap.periods.all.day.tokens.costUsd
 
+  const activeRacersMap = new Map<string, LiveAgentCard>()
+  for (const card of [...agents, ...subagents]) {
+    if (card.state !== 'done' && !activeRacersMap.has(card.sessionKey)) {
+      activeRacersMap.set(card.sessionKey, card)
+    }
+  }
+  const activeRacers = Array.from(activeRacersMap.values())
+  const mascotByKey = assignSessionMascots(activeRacers.map((card) => card.sessionKey))
+  const raceTrackHtml = renderSessionRaceTrackHtml(activeRacers, mascotByKey, formatRateTokPerSec)
+
   const kpiHtml = `
     <div class="tp-live-kpi-sticky">
       <div class="tp-kpi-grid">
@@ -584,6 +595,7 @@ function renderLiveView(
         </div>
         ${renderTricolorBar(tokens, msg, true)}
       </div>
+      ${raceTrackHtml}
     </div>
   `
 
@@ -591,6 +603,10 @@ function renderLiveView(
     const color = AGENT_COLORS[a.agent]
     const providerModel = `${a.providerLabel} · ${a.modelLabel}`
     const projWt = formatProjectWorktreeLabel(a.projectName, a.workspaceName)
+    const mascot = mascotByKey.get(a.sessionKey)
+    const avatarHtml = mascot
+      ? `<span class="tp-racer-avatar" style="background:${mascot.palette.tint}" aria-hidden="true">${renderMascotSvg(mascot, 'tp-racer-avatar-svg')}</span>`
+      : ''
     return `
       <div
         class="tp-item-card tp-live-card-clickable${nested ? ' tp-subagent-card' : ''}"
@@ -602,6 +618,7 @@ function renderLiveView(
         <div class="tp-row-between">
           <div class="tp-row-left">
             ${nested ? '<span class="tp-subagent-marker" aria-hidden="true">↳</span>' : ''}
+            ${avatarHtml}
             <span class="tp-agent-badge tp-agent-${a.agent}">${escapeHtml(msg.agentNames[a.agent])}</span>
             <span class="tp-state tp-state-${a.state}">
               <span class="tp-state-dot"></span>${escapeHtml(msg.states[a.state])}
@@ -1966,9 +1983,9 @@ function initBrowserPanel(): void {
     const target = ev.target as HTMLElement | null
     if (!target) return
 
-    const liveCard = target.closest<HTMLElement>('[data-live-agent-key]')
+    const liveCard = target.closest<HTMLElement>('[data-live-agent-key], [data-race-agent-key]')
     if (liveCard && currentTab === 'live') {
-      const key = liveCard.dataset.liveAgentKey?.trim() || ''
+      const key = (liveCard.dataset.liveAgentKey ?? liveCard.dataset.raceAgentKey ?? '').trim()
       if (key) {
         const agent = snapshot ? findLiveAgent(snapshot, key) : null
         void focusLiveAgent(agent)
@@ -2125,10 +2142,10 @@ function initBrowserPanel(): void {
     }
     if (ev.key === 'Enter' || ev.key === ' ') {
       const target = ev.target as HTMLElement | null
-      const liveCard = target?.closest<HTMLElement>('[data-live-agent-key]')
+      const liveCard = target?.closest<HTMLElement>('[data-live-agent-key], [data-race-agent-key]')
       if (liveCard && currentTab === 'live') {
         ev.preventDefault()
-        const key = liveCard.dataset.liveAgentKey?.trim() || ''
+        const key = (liveCard.dataset.liveAgentKey ?? liveCard.dataset.raceAgentKey ?? '').trim()
         if (key) selectLiveAgent(key)
       }
     }
