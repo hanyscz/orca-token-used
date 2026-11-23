@@ -288,44 +288,172 @@ function truncateRaceLabel(title: string, maxLen = 18): string {
   return `${clean.slice(0, maxLen - 1)}…`
 }
 
+export interface RaceSquad {
+  lead: LiveAgentCard
+  subagents: LiveAgentCard[]
+  totalRate: number
+  isOrphan: boolean
+}
+
+export function buildActiveRaceSquads(
+  agents: LiveAgentCard[],
+  subagents: LiveAgentCard[]
+): {
+  squads: RaceSquad[]
+  mascotByKey: Map<string, SessionMascot>
+  totalActiveCount: number
+} {
+  const byKey = new Map<string, LiveAgentCard>()
+  for (const card of [...agents, ...subagents]) {
+    if (!byKey.has(card.sessionKey)) {
+      byKey.set(card.sessionKey, card)
+    }
+  }
+
+  // Safe parent map (cycle-free)
+  const parentByChild = new Map<string, string>()
+  for (const child of subagents) {
+    const parent = child.parentSessionKey
+    if (!parent || !byKey.has(parent) || parent === child.sessionKey) continue
+    let ancestor: string | undefined = parent
+    while (ancestor && ancestor !== child.sessionKey) {
+      ancestor = parentByChild.get(ancestor)
+    }
+    if (ancestor !== child.sessionKey) {
+      parentByChild.set(child.sessionKey, parent)
+    }
+  }
+
+  const findActiveRootKey = (key: string): string | null => {
+    let cur: string | undefined = parentByChild.get(key)
+    let highestActive: string | null = null
+    while (cur) {
+      const card = byKey.get(cur)
+      if (card && card.state !== 'done') {
+        highestActive = cur
+      }
+      cur = parentByChild.get(cur)
+    }
+    return highestActive
+  }
+
+  const activeCards = Array.from(byKey.values()).filter((card) => card.state !== 'done')
+  if (activeCards.length === 0) {
+    return { squads: [], mascotByKey: new Map(), totalActiveCount: 0 }
+  }
+
+  const squadMap = new Map<string, { lead: LiveAgentCard; subagents: LiveAgentCard[]; isOrphan: boolean }>()
+
+  // First pass: register every active root / top-most orphan as a squad lead
+  for (const card of activeCards) {
+    const rootKey = findActiveRootKey(card.sessionKey)
+    if (!rootKey) {
+      const isOrphan = Boolean(card.parentSessionKey)
+      squadMap.set(card.sessionKey, { lead: card, subagents: [], isOrphan })
+    }
+  }
+
+  // Second pass: attach active descendants to their active root squad lead
+  for (const card of activeCards) {
+    const rootKey = findActiveRootKey(card.sessionKey)
+    if (rootKey) {
+      const squad = squadMap.get(rootKey)
+      if (squad) {
+        squad.subagents.push(card)
+      }
+    }
+  }
+
+  const squads: RaceSquad[] = Array.from(squadMap.values()).map((entry) => {
+    const sortedSubs = [...entry.subagents].sort(
+      (a, b) => b.liveOutRate - a.liveOutRate || a.sessionKey.localeCompare(b.sessionKey)
+    )
+    const totalRate =
+      entry.lead.liveOutRate + sortedSubs.reduce((sum, child) => sum + child.liveOutRate, 0)
+    return {
+      lead: entry.lead,
+      subagents: sortedSubs,
+      totalRate,
+      isOrphan: entry.isOrphan
+    }
+  })
+
+  // Assign unique species/palette to each squad lead
+  const mascotByKey = assignSessionMascots(squads.map((sq) => sq.lead.sessionKey))
+
+  // Children inherit their lead's species & palette and receive distinct accessories
+  for (const sq of squads) {
+    const leadMascot = mascotByKey.get(sq.lead.sessionKey)
+    if (!leadMascot || sq.subagents.length === 0) continue
+    const childAccessories = MASCOT_ACCESSORIES.filter((acc) => acc !== leadMascot.accessory)
+    const stableChildren = [...sq.subagents].sort((a, b) => a.sessionKey.localeCompare(b.sessionKey))
+    stableChildren.forEach((child, idx) => {
+      const acc = childAccessories[idx % childAccessories.length] ?? leadMascot.accessory
+      mascotByKey.set(child.sessionKey, {
+        species: leadMascot.species,
+        palette: leadMascot.palette,
+        accessory: acc,
+        signature: `${leadMascot.species}:${leadMascot.palette.id}:${acc}`
+      })
+    })
+  }
+
+  return { squads, mascotByKey, totalActiveCount: activeCards.length }
+}
+
 export function renderSessionRaceTrackHtml(
-  activeRacers: LiveAgentCard[],
+  squads: RaceSquad[],
   mascotByKey: Map<string, SessionMascot>,
   formatRate: (rate: number) => string
 ): string {
-  if (activeRacers.length === 0) return ''
+  if (squads.length === 0) return ''
 
-  const maxRate = Math.max(...activeRacers.map((r) => r.liveOutRate), 60)
-  const workingRacers = activeRacers.filter((r) => r.state === 'working')
-  const sprintingRacers = workingRacers.filter((r) => r.liveOutRate > 0)
+  const totalActiveCount = squads.reduce((sum, sq) => sum + 1 + sq.subagents.length, 0)
+  const hasAnySubagents = squads.some((sq) => sq.subagents.length > 0)
+  const maxRate = Math.max(...squads.map((sq) => sq.totalRate), 60)
+
+  const workingSquads = squads.filter(
+    (sq) => sq.lead.state === 'working' || sq.subagents.some((c) => c.state === 'working')
+  )
+  const sprintingSquads = squads.filter((sq) => sq.totalRate > 0)
   const leader =
-    sprintingRacers.length > 0
-      ? [...sprintingRacers].sort((a, b) => b.liveOutRate - a.liveOutRate || b.tokens.total - a.tokens.total)[0]
+    sprintingSquads.length > 0
+      ? [...sprintingSquads].sort(
+          (a, b) =>
+            b.totalRate - a.totalRate ||
+            b.lead.tokens.total - a.lead.tokens.total
+        )[0]
       : null
-  const anyMoving = sprintingRacers.length > 0
+  const anyMoving = sprintingSquads.length > 0
 
+  const leaderSuffix = leader && leader.subagents.length > 0 ? ` (+${leader.subagents.length})` : ''
   const leaderHtml = leader
-    ? `<span class="tp-race-leader" title="${escapeRaceHtml(leader.title)}">👑 ${escapeRaceHtml(truncateRaceLabel(leader.title, 16))} · ${escapeRaceHtml(formatRate(leader.liveOutRate))}</span>`
-    : workingRacers.length > 0
-      ? `<span class="tp-race-leader tp-race-leader-idle">💭 ${workingRacers.length} thinking</span>`
-      : `<span class="tp-race-leader tp-race-leader-idle">✋ ${activeRacers.length} waiting</span>`
+    ? `<span class="tp-race-leader" title="${escapeRaceHtml(leader.lead.title)}">👑 ${escapeRaceHtml(truncateRaceLabel(leader.lead.title, 15))}${leaderSuffix} · ${escapeRaceHtml(formatRate(leader.totalRate))}</span>`
+    : workingSquads.length > 0
+      ? `<span class="tp-race-leader tp-race-leader-idle">💭 ${workingSquads.length} thinking</span>`
+      : `<span class="tp-race-leader tp-race-leader-idle">✋ ${squads.length} waiting</span>`
 
-  const runnersHtml = activeRacers
-    .map((racer, idx) => {
-      const mascot = mascotByKey.get(racer.sessionKey)
-      if (!mascot) return ''
+  const trackTitle = hasAnySubagents
+    ? `🏁 LIVE RACE · ${squads.length} (${totalActiveCount})`
+    : `🏁 LIVE RACE · ${squads.length}`
 
-      const isWorking = racer.state === 'working'
-      const isSprinting = isWorking && racer.liveOutRate > 0
-      const isLeader = Boolean(leader && leader.sessionKey === racer.sessionKey && leader.liveOutRate > 0)
+  const runnersHtml = squads
+    .map((sq, idx) => {
+      const leadMascot = mascotByKey.get(sq.lead.sessionKey)
+      if (!leadMascot) return ''
+
+      const isWorking =
+        sq.lead.state === 'working' || sq.subagents.some((c) => c.state === 'working')
+      const isSprinting = sq.totalRate > 0
+      const isLeader = Boolean(leader && leader.lead.sessionKey === sq.lead.sessionKey)
 
       let pct: number
       if (isSprinting) {
-        pct = Math.round(24 + Math.min(1, racer.liveOutRate / maxRate) * 62)
+        pct = Math.round(24 + Math.min(1, sq.totalRate / maxRate) * 60)
       } else if (isWorking) {
-        pct = 20 + ((idx * 5) % 14)
+        pct = 20 + ((idx * 6) % 14)
       } else {
-        pct = 9 + ((idx * 4) % 11)
+        pct = 10 + ((idx * 5) % 12)
       }
       const bottomPx = 4 + (idx % 2) * 3
       const stateCls = isSprinting
@@ -333,24 +461,57 @@ export function renderSessionRaceTrackHtml(
         : isWorking
           ? 'tp-race-thinking'
           : 'tp-race-waiting'
-      const emote = isSprinting ? '' : isWorking ? '💭' : racer.state === 'blocked' ? '⚠️' : '✋'
-      const tipText = `${truncateRaceLabel(racer.title, 20)} · ${isWorking ? formatRate(racer.liveOutRate) : racer.state}`
+      const emote = isSprinting
+        ? ''
+        : isWorking
+          ? '💭'
+          : sq.lead.state === 'blocked'
+            ? '⚠️'
+            : '✋'
 
-      const tipAlignCls = pct <= 18 ? ' tp-race-tip-left' : pct >= 82 ? ' tp-race-tip-right' : ''
+      const subSummary =
+        sq.subagents.length > 0
+          ? ` (${sq.subagents.length} sub: ${sq.subagents
+              .slice(0, 2)
+              .map((c) => `${truncateRaceLabel(c.title, 12)} ${formatRate(c.liveOutRate)}`)
+              .join(', ')}${sq.subagents.length > 2 ? ', …' : ''})`
+          : ''
+      const ratePart = isWorking ? formatRate(sq.totalRate) : sq.lead.state
+      const tipText = `${truncateRaceLabel(sq.lead.title, 18)} · ${ratePart}${subSummary}`
+      const tipAlignCls = pct <= 22 ? ' tp-race-tip-left' : pct >= 78 ? ' tp-race-tip-right' : ''
+
+      const visibleSubs = sq.subagents.slice(0, 3)
+      const overflowCount = sq.subagents.length - visibleSubs.length
+      const ducklingsHtml =
+        visibleSubs.length > 0
+          ? `<span class="tp-race-ducklings" aria-hidden="true">${
+              overflowCount > 0
+                ? `<span class="tp-race-more" style="background:${leadMascot.palette.dark}">+${overflowCount}</span>`
+                : ''
+            }${visibleSubs
+              .map((child) => {
+                const cm = mascotByKey.get(child.sessionKey) ?? leadMascot
+                return `<span class="tp-race-duckling">${renderMascotSvg(cm, 'tp-race-duckling-svg')}</span>`
+              })
+              .join('')}</span>`
+          : ''
 
       return `
         <div
-          class="tp-race-runner ${stateCls}"
+          class="tp-race-runner tp-race-train ${stateCls}"
           role="button"
           tabindex="0"
-          data-race-agent-key="${escapeRaceHtml(racer.sessionKey)}"
+          data-race-agent-key="${escapeRaceHtml(sq.lead.sessionKey)}"
           aria-label="${escapeRaceHtml(tipText)}"
           style="left:${pct}%;bottom:${bottomPx}px"
         >
-          ${isLeader ? '<span class="tp-race-crown" aria-hidden="true">👑</span>' : ''}
-          ${emote ? `<span class="tp-race-emote" aria-hidden="true">${emote}</span>` : ''}
           <span class="tp-race-tip${tipAlignCls}">${escapeRaceHtml(tipText)}</span>
-          ${renderMascotSvg(mascot, 'tp-race-mascot')}
+          ${ducklingsHtml}
+          <span class="tp-race-train-lead">
+            ${isLeader ? '<span class="tp-race-crown" aria-hidden="true">👑</span>' : ''}
+            ${emote ? `<span class="tp-race-emote" aria-hidden="true">${emote}</span>` : ''}
+            ${renderMascotSvg(leadMascot, sq.isOrphan ? 'tp-race-mascot tp-race-mascot-orphan' : 'tp-race-mascot')}
+          </span>
         </div>
       `
     })
@@ -359,7 +520,7 @@ export function renderSessionRaceTrackHtml(
   return `
     <div class="tp-race-card">
       <div class="tp-race-top">
-        <span class="tp-race-label">🏁 LIVE RACE · ${activeRacers.length}</span>
+        <span class="tp-race-label">${trackTitle}</span>
         ${leaderHtml}
       </div>
       <div class="tp-race-stage">

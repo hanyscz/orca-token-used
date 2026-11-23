@@ -23,7 +23,7 @@ import {
   renderDashboardShellHtml,
   renderIoWaveformSvg
 } from './panel/app'
-import { assignSessionMascots } from './panel/race'
+import { assignSessionMascots, buildActiveRaceSquads } from './panel/race'
 import { formatTokens, formatUsd, getMessages, resolveLocale } from './panel/i18n'
 import {
   applyAntigravityLines,
@@ -4231,4 +4231,75 @@ test('decluttered views remove subheaders & hero rate duplication, flatten Sessi
   const statsHtml = renderDashboardShellHtml({ snap, tab: 'day', scope: 'all', locale: 'en', nowMs: now })
   assert.ok(statsHtml.includes('tp-cache-hit-low'))
   assert.ok(statsHtml.includes('>25%</span>'))
+})
+
+test('Live Race groups parent + active subagents into family duckling squad trains with overflow badge and preserves active orphans', () => {
+  const now = Date.now()
+  const snap = createQuotaTestSnapshot(undefined, now)
+  const makeCard = (
+    key: string,
+    state: DashboardSnapshot['live']['agents'][number]['state'],
+    title: string,
+    liveOutRate: number,
+    parentSessionKey?: string
+  ): DashboardSnapshot['live']['agents'][number] => ({
+    id: key,
+    sessionKey: key,
+    parentSessionKey,
+    title,
+    agent: 'antigravity',
+    state,
+    terminalId: null,
+    providerLabel: 'Google',
+    modelLabel: 'gemini-pro-orchestrator-neon',
+    projectName: 'proj',
+    workspaceName: 'main',
+    workspacePath: '/tmp/proj',
+    updatedAt: now,
+    liveOutRate,
+    liveInRate: 0,
+    tokens: { input: 1000, output: 500, reasoning: 0, cacheRead: 2000, cacheWrite: 0, total: 3500, costUsd: 0.2 },
+    tps: { avgTps: 20, peakTps: 50, liveTps: liveOutRate },
+    sparkline: [0, liveOutRate],
+    outSeries: [0, liveOutRate],
+    inSeries: [0, 0]
+  })
+
+  const parent = makeCard('agy:parent-1', 'waiting', '# console改造', 0)
+  const sub1 = makeCard('agy:sub-1', 'working', 'infra', 40, 'agy:parent-1')
+  const sub2 = makeCard('agy:sub-2', 'working', 'icons', 25, 'agy:parent-1')
+  const sub3 = makeCard('agy:sub-3', 'working', 'tests', 15, 'agy:parent-1')
+  const sub4 = makeCard('agy:sub-4', 'working', 'docs', 10, 'agy:parent-1')
+  const orphan = makeCard('agy:orphan-1', 'working', 'solo-worker', 30, 'agy:missing-parent')
+
+  const { squads, mascotByKey, totalActiveCount } = buildActiveRaceSquads(
+    [parent],
+    [sub1, sub2, sub3, sub4, orphan]
+  )
+  assert.equal(totalActiveCount, 6)
+  assert.equal(squads.length, 2)
+
+  const mainSquad = squads.find((sq) => sq.lead.sessionKey === 'agy:parent-1')!
+  assert.equal(mainSquad.subagents.length, 4)
+  assert.equal(mainSquad.totalRate, 90)
+
+  // Family inheritance: children share parent's species + palette, with distinct accessory
+  const parentMascot = mascotByKey.get('agy:parent-1')!
+  for (const subKey of ['agy:sub-1', 'agy:sub-2', 'agy:sub-3', 'agy:sub-4']) {
+    const childMascot = mascotByKey.get(subKey)!
+    assert.equal(childMascot.species, parentMascot.species)
+    assert.equal(childMascot.palette.id, parentMascot.palette.id)
+    assert.notEqual(childMascot.accessory, parentMascot.accessory)
+  }
+
+  snap.live.agents = [parent]
+  snap.live.subagents = [sub1, sub2, sub3, sub4, orphan]
+  const html = renderDashboardShellHtml({ snap, tab: 'live', scope: 'all', locale: 'en', nowMs: now })
+  assert.ok(html.includes('🏁 LIVE RACE · 2 (6)'))
+  assert.equal((html.match(/data-race-agent-key="/g) ?? []).length, 2)
+  assert.equal((html.match(/class="tp-race-duckling"/g) ?? []).length, 3)
+  assert.ok(html.includes('class="tp-race-more"'))
+  assert.ok(html.includes('+1</span>'))
+  assert.ok(html.includes('tp-racer-avatar-sub'))
+  assert.ok(html.includes('(+4)'))
 })

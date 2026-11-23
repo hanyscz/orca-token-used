@@ -455,6 +455,53 @@ body {
   z-index: 12;
 }
 
+.tp-race-train {
+  display: inline-flex;
+  align-items: flex-end;
+}
+
+.tp-race-train-lead {
+  position: relative;
+  display: inline-block;
+}
+
+.tp-race-ducklings {
+  display: inline-flex;
+  align-items: flex-end;
+  margin-right: -4px;
+  padding-bottom: 1px;
+}
+
+.tp-race-duckling {
+  position: relative;
+  margin-left: -7px;
+  display: inline-block;
+}
+
+.tp-race-duckling:first-child {
+  margin-left: 0;
+}
+
+.tp-race-duckling-svg {
+  width: 17px;
+  height: 17px;
+  display: block;
+  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.16));
+}
+
+.tp-race-more {
+  font-family: var(--tp-font-mono);
+  font-size: 8.5px;
+  font-weight: 800;
+  padding: 0 3.5px;
+  height: 13px;
+  line-height: 13px;
+  border-radius: 999px;
+  color: #ffffff;
+  margin-right: 2px;
+  margin-bottom: 2px;
+}
+
 .tp-race-mascot {
   width: 28px;
   height: 28px;
@@ -462,15 +509,31 @@ body {
   filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.16));
 }
 
-.tp-race-sprinting .tp-race-mascot {
+.tp-race-mascot-orphan {
+  width: 22px;
+  height: 22px;
+}
+
+.tp-race-sprinting .tp-race-mascot,
+.tp-race-sprinting .tp-race-duckling-svg {
   animation: tp-race-hop 0.38s ease-in-out infinite;
 }
 
-.tp-race-thinking .tp-race-mascot {
+.tp-race-sprinting .tp-race-duckling:nth-child(2) .tp-race-duckling-svg {
+  animation-delay: 0.08s;
+}
+
+.tp-race-sprinting .tp-race-duckling:nth-child(3) .tp-race-duckling-svg {
+  animation-delay: 0.16s;
+}
+
+.tp-race-thinking .tp-race-mascot,
+.tp-race-thinking .tp-race-duckling-svg {
   animation: tp-race-float 1.6s ease-in-out infinite;
 }
 
-.tp-race-waiting .tp-race-mascot {
+.tp-race-waiting .tp-race-mascot,
+.tp-race-waiting .tp-race-duckling-svg {
   animation: tp-race-sway 2.1s ease-in-out infinite;
   opacity: 0.86;
 }
@@ -566,6 +629,16 @@ body {
   flex-shrink: 0;
 }
 
+.tp-racer-avatar-sub {
+  width: 17px;
+  height: 17px;
+}
+
+.tp-racer-avatar-sub .tp-racer-avatar-svg {
+  width: 14px;
+  height: 14px;
+}
+
 .tp-racer-avatar-svg {
   width: 17px;
   height: 17px;
@@ -575,8 +648,11 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .tp-race-road,
   .tp-race-sprinting .tp-race-mascot,
+  .tp-race-sprinting .tp-race-duckling-svg,
   .tp-race-thinking .tp-race-mascot,
-  .tp-race-waiting .tp-race-mascot {
+  .tp-race-thinking .tp-race-duckling-svg,
+  .tp-race-waiting .tp-race-mascot,
+  .tp-race-waiting .tp-race-duckling-svg {
     animation: none;
   }
 }

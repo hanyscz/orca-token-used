@@ -1,5 +1,5 @@
 import type {} from 'orca/frame'
-import { assignSessionMascots, renderMascotSvg, renderSessionRaceTrackHtml } from './race'
+import { buildActiveRaceSquads, renderMascotSvg, renderSessionRaceTrackHtml } from './race'
 import type {
   AgentKind,
   AgentRunState,
@@ -571,15 +571,8 @@ function renderLiveView(
   const { tokens, tps, agents, subagents = [] } = snap.live
   const todayCost = snap.periods.all.day.tokens.costUsd
 
-  const activeRacersMap = new Map<string, LiveAgentCard>()
-  for (const card of [...agents, ...subagents]) {
-    if (card.state !== 'done' && !activeRacersMap.has(card.sessionKey)) {
-      activeRacersMap.set(card.sessionKey, card)
-    }
-  }
-  const activeRacers = Array.from(activeRacersMap.values())
-  const mascotByKey = assignSessionMascots(activeRacers.map((card) => card.sessionKey))
-  const raceTrackHtml = renderSessionRaceTrackHtml(activeRacers, mascotByKey, formatRateTokPerSec)
+  const { squads, mascotByKey } = buildActiveRaceSquads(agents, subagents)
+  const raceTrackHtml = renderSessionRaceTrackHtml(squads, mascotByKey, formatRateTokPerSec)
 
   const kpiHtml = `
     <div class="tp-live-kpi-sticky">
@@ -609,7 +602,7 @@ function renderLiveView(
     const projWt = formatProjectWorktreeLabel(a.projectName, a.workspaceName)
     const mascot = mascotByKey.get(a.sessionKey)
     const avatarHtml = mascot
-      ? `<span class="tp-racer-avatar" style="background:${mascot.palette.tint}" aria-hidden="true">${renderMascotSvg(mascot, 'tp-racer-avatar-svg')}</span>`
+      ? `<span class="tp-racer-avatar${nested ? ' tp-racer-avatar-sub' : ''}" style="background:${mascot.palette.tint}" aria-hidden="true">${renderMascotSvg(mascot, 'tp-racer-avatar-svg')}</span>`
       : ''
     return `
       <div
