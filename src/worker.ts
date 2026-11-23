@@ -54,7 +54,6 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   let livePollSeconds = 2
   let dailyBudgetUsd = 0
   let quotaAlertPercent = 85
-  const notifiedAlerts = new Set<string>()
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let pricingTimer: ReturnType<typeof setInterval> | null = null
   let quotaTimer: ReturnType<typeof setInterval> | null = null
@@ -431,41 +430,26 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     }
   }
 
-  interface QuotaAlertHit {
-    key: string
-    label: string
-    usedPercent: number
-  }
-
   function summarizeQuotasForStatus(quotasSnap: QuotasSnapshot | undefined): {
     maxPercent: number
     summaryParts: string[]
-    hits: QuotaAlertHit[]
   } {
     const summaryParts: string[] = []
-    const hits: QuotaAlertHit[] = []
     let maxPercent = 0
-    if (!quotasSnap) return { maxPercent, summaryParts, hits }
+    if (!quotasSnap) return { maxPercent, summaryParts }
 
     for (const provider of quotasSnap.providers) {
       if (provider.status !== 'ok') continue
       const inspectWindow = (
         poolLabel: string,
         winLabel: '5h' | '7d',
-        win: { usedPercent: number; resetsAt: number | null } | null | undefined
+        win: { usedPercent: number } | null | undefined
       ): void => {
         if (!win || !Number.isFinite(win.usedPercent)) return
         const pct = Math.max(0, Math.min(100, Math.round(win.usedPercent)))
         if (pct > maxPercent) maxPercent = pct
         const tag = poolLabel ? `${provider.label} ${poolLabel} ${winLabel}` : `${provider.label} ${winLabel}`
         if (pct >= 50) summaryParts.push(`${tag}: ${pct}%`)
-        if (quotaAlertPercent > 0 && pct >= quotaAlertPercent) {
-          hits.push({
-            key: `quota:${provider.provider}:${poolLabel}:${winLabel}:${win.resetsAt ?? 'none'}:${quotaAlertPercent}`,
-            label: tag,
-            usedPercent: pct
-          })
-        }
       }
 
       if (provider.pools && provider.pools.length > 0) {
@@ -479,49 +463,12 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
       }
     }
 
-    return { maxPercent, summaryParts: summaryParts.slice(0, 4), hits }
-  }
-
-  async function maybeSendAlerts(snap: DashboardSnapshot, hits: QuotaAlertHit[]): Promise<void> {
-    if (
-      !orca.host.has('notifications.show') ||
-      !orca.grantedCapabilities.includes('notifications:show')
-    ) {
-      return
-    }
-    const dayCost = snap.periods.all.day.tokens.costUsd
-    const dayKey = new Date(snap.generatedAt).toISOString().slice(0, 10)
-
-    if (dailyBudgetUsd > 0 && dayCost >= dailyBudgetUsd) {
-      const budgetAlertKey = `budget:${dayKey}:${dailyBudgetUsd}`
-      if (!notifiedAlerts.has(budgetAlertKey)) {
-        notifiedAlerts.add(budgetAlertKey)
-        await orca.host
-          .call('notifications.show', {
-            title: 'Token Pulse: Daily Spend Alert',
-            body: `Today's spend reached ${formatUsd(dayCost)} (limit ${formatUsd(dailyBudgetUsd)}).`
-          })
-          .catch(() => {})
-      }
-    }
-
-    for (const hit of hits) {
-      if (notifiedAlerts.has(hit.key)) continue
-      notifiedAlerts.add(hit.key)
-      await orca.host
-        .call('notifications.show', {
-          title: 'Token Pulse: Quota Alert',
-          body: `${hit.label} reached ${hit.usedPercent}% usage.`
-        })
-        .catch(() => {})
-    }
+    return { maxPercent, summaryParts: summaryParts.slice(0, 4) }
   }
 
   async function updateStatusBar(snap: DashboardSnapshot): Promise<void> {
-    const quotaInfo = summarizeQuotasForStatus(snap.quotas)
-    void maybeSendAlerts(snap, quotaInfo.hits)
-
     if (!orca.host.has('statusBar.update')) return
+    const quotaInfo = summarizeQuotasForStatus(snap.quotas)
     const msg = getMessages(currentLocale)
     const dayTokens = snap.periods.all.day.tokens
     const anyWorking = snap.live.tps.liveTps > 0 || snap.live.agents.some((a) => a.state === 'working')

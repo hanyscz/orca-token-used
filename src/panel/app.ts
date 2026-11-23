@@ -819,7 +819,12 @@ function renderSessionsView(
               <span>${escapeHtml(rel)}${s.active ? ` · <strong style="color:#10b981">${escapeHtml(msg.activeBadge)}</strong>` : ''}</span>
             </span>
             <span>
-              <strong style="color:var(--tp-fg);font-family:var(--tp-font-mono)">${formatTokens(s.tokens.total)} tok</strong> ·
+              ${(() => {
+                const hit = computeCacheHitPercent(s.tokens)
+                return hit !== null && s.tokens.total >= 5000
+                  ? `<span class="tp-cache-hit${hit < 50 ? ' tp-cache-hit-low' : ''}">${escapeHtml(msg.cacheShort)} ${hit}%</span> · `
+                  : ''
+              })()}<strong style="color:var(--tp-fg);font-family:var(--tp-font-mono)">${formatTokens(s.tokens.total)} tok</strong> ·
               <span class="tp-cost-pill">${formatUsd(s.tokens.costUsd)}</span>
             </span>
           </div>
@@ -899,7 +904,12 @@ function renderPeriodView(
       </div>
     </div>
     <div class="tp-card">
-      ${renderTricolorBar(period.tokens, msg, true)}
+      ${(() => {
+        const hit = computeCacheHitPercent(period.tokens)
+        return hit !== null
+          ? `<div class="tp-row-between" style="margin-bottom:4px"><span class="tp-kpi-label">${escapeHtml(msg.cacheShort)}</span><span class="tp-cache-hit${hit < 50 ? ' tp-cache-hit-low' : ''}">${hit}%</span></div>`
+          : ''
+      })()}${renderTricolorBar(period.tokens, msg, true)}
     </div>
   `
 

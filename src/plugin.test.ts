@@ -4210,11 +4210,25 @@ test('decluttered views remove subheaders & hero rate duplication, flatten Sessi
       createdAt: now - 1000,
       active: false,
       tps: { avgTps: 20, peakTps: 30, liveTps: 0 },
-      tokens: { input: 1000, output: 500, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 1500, costUsd: 0.05 }
+      tokens: { input: 2000, output: 500, reasoning: 0, cacheRead: 8000, cacheWrite: 0, total: 10500, costUsd: 0.05 }
     }
   ]
   const sessionsHtml = renderDashboardShellHtml({ snap, tab: 'sessions', scope: 'all', locale: 'en', nowMs: now })
   assert.ok(!sessionsHtml.includes('sessions:recent'))
   assert.ok(!sessionsHtml.includes('sessions:active'))
   assert.ok(sessionsHtml.includes('Flat session item'))
+  assert.ok(sessionsHtml.includes('Cache 80%'))
+
+  snap.periods.all.day.tokens = {
+    input: 6000,
+    output: 500,
+    reasoning: 0,
+    cacheRead: 2000,
+    cacheWrite: 0,
+    total: 8500,
+    costUsd: 0.42
+  }
+  const statsHtml = renderDashboardShellHtml({ snap, tab: 'day', scope: 'all', locale: 'en', nowMs: now })
+  assert.ok(statsHtml.includes('tp-cache-hit-low'))
+  assert.ok(statsHtml.includes('>25%</span>'))
 })
