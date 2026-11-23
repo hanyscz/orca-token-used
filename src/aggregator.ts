@@ -14,7 +14,9 @@ import type {
   AgentSummaryRow,
   DashboardSnapshot,
   LiveAgentCard,
+  ModelSummaryRow,
   PeriodSummary,
+  ProjectSummaryRow,
   TimeBucket,
   TokenBreakdown,
   TpsStats,
@@ -543,7 +545,9 @@ function aggregatePeriod(
       previousTotalTokens: null,
       deltaPercent: null,
       buckets: [],
-      byAgent: []
+      byAgent: [],
+      byModel: [],
+      byProject: []
     }
   }
 
@@ -566,12 +570,22 @@ function aggregatePeriod(
     gemini: []
   }
   const perAgentFallbackModel: Record<AgentKind, string> = { ...DEFAULT_MODEL_DISPLAY }
+  const perModelMap = new Map<string, { agent: AgentKind; modelLabel: string; turns: ParsedTurnUsage[] }>()
+  const perProjectMap = new Map<
+    string,
+    { label: string; tokens: TokenBreakdown; sessionIds: Set<string> }
+  >()
 
   for (const session of enriched) {
     const agent = session.state.agent
     if (session.modelLabel) {
       perAgentFallbackModel[agent] = session.modelLabel
     }
+    const projectLabel =
+      session.projectName && session.workspaceName && session.projectName !== session.workspaceName
+        ? `${session.projectName} / ${session.workspaceName}`
+        : session.projectName || session.workspaceName || 'Global'
+    const projectKey = projectLabel.toLowerCase()
 
     for (const turn of session.state.turnsByKey.values()) {
       const ts = turn.timestampMs
@@ -604,9 +618,30 @@ function aggregatePeriod(
       totalTokens.total += turn.total
       totalTokens.costUsd += turnCost
 
-      perAgentTurns[agent].push(
-        turn.model ? turn : { ...turn, model: resolvedTurnModel }
-      )
+      const resolvedTurn = turn.model ? turn : { ...turn, model: resolvedTurnModel }
+      perAgentTurns[agent].push(resolvedTurn)
+
+      const modelKey = `${agent}::${resolvedTurnModel.toLowerCase()}`
+      let modelBucket = perModelMap.get(modelKey)
+      if (!modelBucket) {
+        modelBucket = { agent, modelLabel: resolvedTurnModel, turns: [] }
+        perModelMap.set(modelKey, modelBucket)
+      }
+      modelBucket.turns.push(resolvedTurn)
+
+      let projBucket = perProjectMap.get(projectKey)
+      if (!projBucket) {
+        projBucket = { label: projectLabel, tokens: emptyTokenBreakdown(), sessionIds: new Set() }
+        perProjectMap.set(projectKey, projBucket)
+      }
+      projBucket.tokens.input += turn.input
+      projBucket.tokens.output += turn.output
+      projBucket.tokens.reasoning += turn.reasoning
+      projBucket.tokens.cacheRead += turn.cacheRead
+      projBucket.tokens.cacheWrite += turn.cacheWrite
+      projBucket.tokens.total += turn.total
+      projBucket.tokens.costUsd += turnCost
+      projBucket.sessionIds.add(session.state.sessionId)
 
       if (turn.tps !== null && turn.durationSec !== null && turn.tps > 0) {
         totalGenOut += turn.output + turn.reasoning
@@ -647,6 +682,39 @@ function aggregatePeriod(
     }
   }).sort((a, b) => b.tokens.total - a.tokens.total)
 
+  const byModel: ModelSummaryRow[] = Array.from(perModelMap.values())
+    .map((entry) => {
+      const sub = computeTurnSummary(entry.agent, entry.turns, pricing, entry.modelLabel)
+      const sharePercent =
+        totalTokens.total > 0 ? +((sub.tokens.total / totalTokens.total) * 100).toFixed(1) : 0
+      return {
+        modelLabel: entry.modelLabel,
+        providerLabel: providerLabelForAgent(entry.agent, entry.modelLabel),
+        agent: entry.agent,
+        sharePercent,
+        tokens: sub.tokens,
+        tps: sub.tps
+      }
+    })
+    .filter((row) => row.tokens.total > 0)
+    .sort((a, b) => b.tokens.costUsd - a.tokens.costUsd || b.tokens.total - a.tokens.total)
+
+  const byProject: ProjectSummaryRow[] = Array.from(perProjectMap.entries())
+    .map(([projectKey, entry]) => {
+      entry.tokens.costUsd = +entry.tokens.costUsd.toFixed(6)
+      const sharePercent =
+        totalTokens.total > 0 ? +((entry.tokens.total / totalTokens.total) * 100).toFixed(1) : 0
+      return {
+        projectKey,
+        label: entry.label,
+        sharePercent,
+        tokens: entry.tokens,
+        sessionCount: entry.sessionIds.size
+      }
+    })
+    .filter((row) => row.tokens.total > 0)
+    .sort((a, b) => b.tokens.costUsd - a.tokens.costUsd || b.tokens.total - a.tokens.total)
+
   const deltaPercent =
     prevTotalTokens > 0
       ? +(((totalTokens.total - prevTotalTokens) / prevTotalTokens) * 100).toFixed(1)
@@ -662,7 +730,9 @@ function aggregatePeriod(
     previousTotalTokens: prevTotalTokens > 0 ? prevTotalTokens : null,
     deltaPercent,
     buckets,
-    byAgent
+    byAgent,
+    byModel,
+    byProject
   }
 }
 

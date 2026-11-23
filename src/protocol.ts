@@ -8,6 +8,8 @@ export type ViewTab = DashboardTab
 
 export type ScopeMode = 'all' | 'worktree'
 
+export type StatsBreakdownMode = 'agent' | 'model' | 'project'
+
 export type AgentRunState = 'working' | 'waiting' | 'blocked' | 'done'
 
 export interface TokenBreakdown {
@@ -108,6 +110,23 @@ export interface AgentSummaryRow {
   topModel: string
 }
 
+export interface ModelSummaryRow {
+  modelLabel: string
+  providerLabel: string
+  agent: AgentKind
+  sharePercent: number
+  tokens: TokenBreakdown
+  tps: TpsStats
+}
+
+export interface ProjectSummaryRow {
+  projectKey: string
+  label: string
+  sharePercent: number
+  tokens: TokenBreakdown
+  sessionCount: number
+}
+
 export interface PeriodSummary {
   tokens: TokenBreakdown
   tps: TpsStats
@@ -115,6 +134,8 @@ export interface PeriodSummary {
   deltaPercent: number | null
   buckets: TimeBucket[]
   byAgent: AgentSummaryRow[]
+  byModel?: ModelSummaryRow[]
+  byProject?: ProjectSummaryRow[]
 }
 
 export interface PricingStatus {

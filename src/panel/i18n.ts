@@ -5,7 +5,8 @@ export type SupportedLocale = 'zh-TW' | 'zh-CN' | 'en' | 'ja' | 'ko' | 'cs'
 export interface UiMessages {
   appTitle: string
   tabs: Record<ViewTab, string>
-  navShort: Record<ViewTab, string>
+  navShort: Record<ViewTab, string> & { stats: string }
+  breakdownModes: { agent: string; model: string; project: string }
   tabSubtitles: Record<ViewTab, string>
   scopeAll: string
   scopeWorktree: string
@@ -99,7 +100,13 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
       day: '今日',
       week: '本週',
       month: '本月',
-      quotas: '額度'
+      quotas: '額度',
+      stats: '統計'
+    },
+    breakdownModes: {
+      agent: 'Agent',
+      model: '模型',
+      project: '專案'
     },
     tabSubtitles: {
       live: '即時 Agent 狀態、模型與 I/O 脈衝速率',
@@ -209,7 +216,13 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
       day: '今日',
       week: '本周',
       month: '本月',
-      quotas: '额度'
+      quotas: '额度',
+      stats: '统计'
+    },
+    breakdownModes: {
+      agent: 'Agent',
+      model: '模型',
+      project: '项目'
     },
     tabSubtitles: {
       live: '实时 Agent 状态、模型与 I/O 脉冲速率',
@@ -319,7 +332,13 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
       day: 'Today',
       week: 'Week',
       month: 'Month',
-      quotas: 'Quotas'
+      quotas: 'Quotas',
+      stats: 'Stats'
+    },
+    breakdownModes: {
+      agent: 'Agent',
+      model: 'Model',
+      project: 'Project'
     },
     tabSubtitles: {
       live: 'Active agents, provider models & live I/O telemetry',
@@ -429,7 +448,13 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
       day: '今日',
       week: '週間',
       month: '月間',
-      quotas: '枠'
+      quotas: '枠',
+      stats: '統計'
+    },
+    breakdownModes: {
+      agent: 'Agent',
+      model: 'モデル',
+      project: 'プロジェクト'
     },
     tabSubtitles: {
       live: '実行中エージェント・モデル・I/O ストリーム',
@@ -539,7 +564,13 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
       day: '오늘',
       week: '주간',
       month: '월간',
-      quotas: '한도'
+      quotas: '한도',
+      stats: '통계'
+    },
+    breakdownModes: {
+      agent: 'Agent',
+      model: '모델',
+      project: '프로젝트'
     },
     tabSubtitles: {
       live: '실행 중인 에이전트, 모델 및 실시간 I/O 파형',
@@ -649,7 +680,13 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
       day: 'Dnes',
       week: 'Týden',
       month: 'Měsíc',
-      quotas: 'Kvóty'
+      quotas: 'Kvóty',
+      stats: 'Statistiky'
+    },
+    breakdownModes: {
+      agent: 'Agent',
+      model: 'Model',
+      project: 'Projekt'
     },
     tabSubtitles: {
       live: 'Aktivní agenti, modely a živá I/O telemetrie',

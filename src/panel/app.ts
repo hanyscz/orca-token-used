@@ -14,6 +14,7 @@ import type {
   QuotasSnapshot,
   QuotaWindow,
   ScopeMode,
+  StatsBreakdownMode,
   TimeBucket,
   TokenBreakdown,
   ViewTab,
@@ -40,6 +41,12 @@ const AGENT_COLORS: Record<AgentKind, string> = {
 }
 
 export const TAB_ORDER: readonly ViewTab[] = ['live', 'sessions', 'day', 'week', 'month', 'quotas']
+
+const STATS_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`
+
+function isPeriodTab(tab: ViewTab): tab is 'day' | 'week' | 'month' {
+  return tab === 'day' || tab === 'week' || tab === 'month'
+}
 
 /** Pure SVG icons for the 6 view tabs */
 export const TAB_ICONS_SVG: Record<ViewTab, string> = {
@@ -847,7 +854,8 @@ function renderPeriodView(
   period: PeriodSummary,
   snap: DashboardSnapshot,
   scope: ScopeMode,
-  msg: UiMessages
+  msg: UiMessages,
+  breakdown: StatsBreakdownMode = 'agent'
 ): string {
   const chartHeader =
     periodKey === 'day'
@@ -863,15 +871,30 @@ function renderPeriodView(
     deltaHtml = `<span class="${cls}">${sign}${period.deltaPercent.toFixed(1)}%</span> ${escapeHtml(msg.vsPrevious)}`
   }
 
-  const focusedBannerHtml =
-    scope === 'worktree' && (snap.workspace.project || snap.workspace.name)
-      ? `<div class="tp-kpi-meta" style="margin-top:-2px">${escapeHtml(msg.worktreePrefix)}: ${escapeHtml(
-          formatProjectWorktreeLabel(snap.workspace.project, snap.workspace.name, snap.workspace.branch)
-        )}</div>`
-      : ''
+  const periodSwitchHtml = `
+    <div class="tp-period-controls">
+      <div class="tp-scope-switch" role="tablist" aria-label="${escapeHtml(msg.navShort.stats)}">
+        ${(['day', 'week', 'month'] as const)
+          .map(
+            (p) => `
+          <button type="button" class="tp-scope-btn ${periodKey === p ? 'active' : ''}" data-tab="${p}">
+            ${escapeHtml(msg.navShort[p])}
+          </button>`
+          )
+          .join('')}
+      </div>
+      ${
+        scope === 'worktree' && (snap.workspace.project || snap.workspace.name)
+          ? `<span class="tp-worktree-pill">${escapeHtml(
+              formatProjectWorktreeLabel(snap.workspace.project, snap.workspace.name, snap.workspace.branch)
+            )}</span>`
+          : ''
+      }
+    </div>
+  `
 
   const kpiHtml = `
-    ${focusedBannerHtml}
+    ${periodSwitchHtml}
     <div class="tp-kpi-grid">
       <div class="tp-card">
         <div class="tp-kpi-label">${escapeHtml(msg.totalTokensLabel)}</div>
@@ -896,41 +919,114 @@ function renderPeriodView(
     </div>
   `
 
-  const rowsHtml = period.byAgent
-    .map((row) => {
-      const color = AGENT_COLORS[row.agent]
-      const providerModel = `${row.providerLabel} · ${row.topModel}`
-      return `
+  const breakdownSwitchHtml = `
+    <div class="tp-row-between" style="margin-bottom:6px">
+      <div class="tp-kpi-label">${escapeHtml(msg.byAgentHeader)}</div>
+      <div class="tp-scope-switch">
+        ${(['agent', 'model', 'project'] as const)
+          .map(
+            (mode) => `
+          <button type="button" class="tp-scope-btn ${breakdown === mode ? 'active' : ''}" data-breakdown="${mode}">
+            ${escapeHtml(msg.breakdownModes[mode])}
+          </button>`
+          )
+          .join('')}
+      </div>
+    </div>
+  `
+
+  let rowsHtml = ''
+  if (breakdown === 'model') {
+    const models = period.byModel ?? []
+    rowsHtml = models
+      .map((row) => {
+        const color = AGENT_COLORS[row.agent]
+        const providerModel = `${row.providerLabel} · ${row.modelLabel}`
+        return `
+          <div class="tp-agent-row">
+            <div class="tp-row-between">
+              <div class="tp-row-left" style="min-width:0">
+                <span class="tp-model-inline" title="${escapeHtml(providerModel)}">${providerLogoHtml(row.providerLabel, row.agent)}<strong style="font-size:11.5px;color:var(--tp-fg)">${escapeHtml(row.modelLabel)}</strong></span>
+                <span style="font-size:11px;color:var(--tp-muted);font-family:var(--tp-font-mono)">${row.sharePercent.toFixed(0)}%</span>
+              </div>
+              <div class="tp-row-left" style="gap:8px;flex-shrink:0">
+                <span class="tp-mono-stat">${formatTokens(row.tokens.total)}</span>
+                <span class="tp-cost-pill">${formatUsd(row.tokens.costUsd)}</span>
+              </div>
+            </div>
+            <div class="tp-share-track">
+              <div class="tp-share-fill" style="width:${Math.min(100, row.sharePercent).toFixed(1)}%;background:${color}"></div>
+            </div>
+            <div class="tp-row-between" style="font-size:10.5px;color:var(--tp-muted);font-family:var(--tp-font-mono)">
+              <span>${escapeHtml(msg.agentNames[row.agent])}</span>
+              <span>${escapeHtml(msg.avgLabel)} ${row.tps.avgTps.toFixed(1)} · ${escapeHtml(msg.peakLabel)} ${row.tps.peakTps.toFixed(1)} tok/s</span>
+            </div>
+          </div>
+        `
+      })
+      .join('')
+  } else if (breakdown === 'project') {
+    const projects = period.byProject ?? []
+    rowsHtml = projects
+      .map((row) => `
         <div class="tp-agent-row">
           <div class="tp-row-between">
-            <div class="tp-row-left">
-              <i class="tp-dot" style="background:${color}"></i>
-              <strong style="font-size:12px">${escapeHtml(msg.agentNames[row.agent])}</strong>
+            <div class="tp-row-left" style="min-width:0">
+              <strong style="font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</strong>
               <span style="font-size:11px;color:var(--tp-muted);font-family:var(--tp-font-mono)">${row.sharePercent.toFixed(0)}%</span>
             </div>
-            <div class="tp-row-left" style="gap:8px">
+            <div class="tp-row-left" style="gap:8px;flex-shrink:0">
               <span class="tp-mono-stat">${formatTokens(row.tokens.total)}</span>
               <span class="tp-cost-pill">${formatUsd(row.tokens.costUsd)}</span>
             </div>
           </div>
           <div class="tp-share-track">
-            <div class="tp-share-fill" style="width:${Math.min(100, row.sharePercent).toFixed(1)}%;background:${color}"></div>
+            <div class="tp-share-fill" style="width:${Math.min(100, row.sharePercent).toFixed(1)}%;background:var(--tp-accent)"></div>
           </div>
           <div class="tp-row-between" style="font-size:10.5px;color:var(--tp-muted);font-family:var(--tp-font-mono)">
-            <span class="tp-model-inline" title="${escapeHtml(providerModel)}">${providerLogoHtml(row.providerLabel, row.agent)}<span>${escapeHtml(row.topModel)}</span></span>
-            <span>${escapeHtml(msg.avgLabel)} ${row.tps.avgTps.toFixed(1)} · ${escapeHtml(msg.peakLabel)} ${row.tps.peakTps.toFixed(1)} tok/s</span>
+            <span>${row.sessionCount} ${escapeHtml(msg.sessionsCountSuffix)}</span>
+            <span>${escapeHtml(msg.outputShort)} ${formatTokens(row.tokens.output + row.tokens.reasoning)}</span>
           </div>
         </div>
-      `
-    })
-    .join('')
+      `)
+      .join('')
+  } else {
+    rowsHtml = period.byAgent
+      .map((row) => {
+        const color = AGENT_COLORS[row.agent]
+        const providerModel = `${row.providerLabel} · ${row.topModel}`
+        return `
+          <div class="tp-agent-row">
+            <div class="tp-row-between">
+              <div class="tp-row-left">
+                <i class="tp-dot" style="background:${color}"></i>
+                <strong style="font-size:12px">${escapeHtml(msg.agentNames[row.agent])}</strong>
+                <span style="font-size:11px;color:var(--tp-muted);font-family:var(--tp-font-mono)">${row.sharePercent.toFixed(0)}%</span>
+              </div>
+              <div class="tp-row-left" style="gap:8px">
+                <span class="tp-mono-stat">${formatTokens(row.tokens.total)}</span>
+                <span class="tp-cost-pill">${formatUsd(row.tokens.costUsd)}</span>
+              </div>
+            </div>
+            <div class="tp-share-track">
+              <div class="tp-share-fill" style="width:${Math.min(100, row.sharePercent).toFixed(1)}%;background:${color}"></div>
+            </div>
+            <div class="tp-row-between" style="font-size:10.5px;color:var(--tp-muted);font-family:var(--tp-font-mono)">
+              <span class="tp-model-inline" title="${escapeHtml(providerModel)}">${providerLogoHtml(row.providerLabel, row.agent)}<span>${escapeHtml(row.topModel)}</span></span>
+              <span>${escapeHtml(msg.avgLabel)} ${row.tps.avgTps.toFixed(1)} · ${escapeHtml(msg.peakLabel)} ${row.tps.peakTps.toFixed(1)} tok/s</span>
+            </div>
+          </div>
+        `
+      })
+      .join('')
+  }
 
   return `
     ${kpiHtml}
     ${chartCard}
     <div class="tp-card">
-      <div class="tp-kpi-label" style="margin-bottom:4px">${escapeHtml(msg.byAgentHeader)}</div>
-      ${period.tokens.total <= 0 ? `<div class="tp-empty" style="margin-top:6px">${escapeHtml(msg.noPeriodData)}</div>` : rowsHtml}
+      ${breakdownSwitchHtml}
+      ${period.tokens.total <= 0 || !rowsHtml ? `<div class="tp-empty" style="margin-top:6px">${escapeHtml(msg.noPeriodData)}</div>` : rowsHtml}
     </div>
   `
 }
@@ -1315,6 +1411,8 @@ export function renderDashboardShellHtml(params: {
   tab: ViewTab
   scope: ScopeMode
   locale: string
+  lastPeriodTab?: 'day' | 'week' | 'month'
+  statsBreakdown?: StatsBreakdownMode
   selectedLiveAgentKey?: string | null
   liveDetailAgent?: LiveAgentCard | null
   isRefreshing?: boolean
@@ -1329,6 +1427,8 @@ export function renderDashboardShellHtml(params: {
     tab,
     scope,
     locale,
+    lastPeriodTab = 'day',
+    statsBreakdown = 'agent',
     selectedLiveAgentKey = null,
     liveDetailAgent = null,
     isRefreshing = false,
@@ -1340,16 +1440,53 @@ export function renderDashboardShellHtml(params: {
   const nowMs = params.nowMs ?? Date.now()
   const msg = getMessages(locale)
 
-  // Inactive tabs render ONLY the SVG icon; the active tab renders SVG icon + localized short label
-  const navButtonsHtml = TAB_ORDER.map((t) => {
-    const isActive = t === tab
-    const btnCls = isActive ? 'tp-nav-btn active' : 'tp-nav-btn'
-    const fullLabel = msg.tabs[t]
-    const innerHtml = isActive
-      ? `${TAB_ICONS_SVG[t]}<span class="tp-nav-label">${escapeHtml(msg.navShort[t])}</span>`
-      : TAB_ICONS_SVG[t]
-    return `<button type="button" role="tab" aria-selected="${isActive ? 'true' : 'false'}" class="${btnCls}" data-tab="${t}" title="${escapeHtml(fullLabel)}" aria-label="${escapeHtml(fullLabel)}">${innerHtml}</button>`
-  }).join('')
+  // 4 primary navigation tabs: Live · Sessions · Stats (Day/Week/Month) · Quotas
+  const primaryNavEntries: Array<{
+    targetTab: ViewTab
+    isActive: boolean
+    icon: string
+    shortLabel: string
+    fullLabel: string
+  }> = [
+    {
+      targetTab: 'live',
+      isActive: tab === 'live',
+      icon: TAB_ICONS_SVG.live,
+      shortLabel: msg.navShort.live,
+      fullLabel: msg.tabs.live
+    },
+    {
+      targetTab: 'sessions',
+      isActive: tab === 'sessions',
+      icon: TAB_ICONS_SVG.sessions,
+      shortLabel: msg.navShort.sessions,
+      fullLabel: msg.tabs.sessions
+    },
+    {
+      targetTab: isPeriodTab(tab) ? tab : lastPeriodTab,
+      isActive: isPeriodTab(tab),
+      icon: STATS_ICON_SVG,
+      shortLabel: msg.navShort.stats,
+      fullLabel: msg.tabs[isPeriodTab(tab) ? tab : lastPeriodTab]
+    },
+    {
+      targetTab: 'quotas',
+      isActive: tab === 'quotas',
+      icon: TAB_ICONS_SVG.quotas,
+      shortLabel: msg.navShort.quotas,
+      fullLabel: msg.tabs.quotas
+    }
+  ]
+
+  const navButtonsHtml = primaryNavEntries
+    .map((entry) => {
+      const btnCls = entry.isActive ? 'tp-nav-btn active' : 'tp-nav-btn'
+      const innerHtml = entry.isActive
+        ? `${entry.icon}<span class="tp-nav-label">${escapeHtml(entry.shortLabel)}</span>`
+        : entry.icon
+      return `<button type="button" role="tab" aria-selected="${entry.isActive ? 'true' : 'false'}" class="${btnCls}" data-tab="${entry.targetTab}" title="${escapeHtml(entry.fullLabel)}" aria-label="${escapeHtml(entry.fullLabel)}">${innerHtml}</button>`
+    })
+    .join('')
 
   const resolvedExpandedAgent: LiveAgentCard | null =
     tab === 'live' && selectedLiveAgentKey
@@ -1410,7 +1547,7 @@ export function renderDashboardShellHtml(params: {
       )
     } else {
       const scopeBag = snap.periods[scope]
-      mainBodyHtml = renderPeriodView(tab, scopeBag[tab], snap, scope, msg)
+      mainBodyHtml = renderPeriodView(tab, scopeBag[tab], snap, scope, msg, statsBreakdown)
     }
 
     const p = snap.pricing
@@ -1496,6 +1633,8 @@ function initBrowserPanel(): void {
   if (!appRoot) return
 
   let currentTab: ViewTab = 'live'
+  let lastPeriodTab: 'day' | 'week' | 'month' = 'day'
+  let statsBreakdown: StatsBreakdownMode = 'agent'
   let currentScope: ScopeMode = 'all'
   let overrideLocale: string | null = null
   let selectedLiveAgentKey: string | null = null
@@ -1526,7 +1665,14 @@ function initBrowserPanel(): void {
 
   try {
     const savedTab = localStorage.getItem('tp.activeTab') as ViewTab | null
-    if (savedTab && TAB_ORDER.includes(savedTab)) currentTab = savedTab
+    if (savedTab && TAB_ORDER.includes(savedTab)) {
+      currentTab = savedTab
+      if (isPeriodTab(savedTab)) lastPeriodTab = savedTab
+    }
+    const savedBreakdown = localStorage.getItem('tp.statsBreakdown')
+    if (savedBreakdown === 'agent' || savedBreakdown === 'model' || savedBreakdown === 'project') {
+      statsBreakdown = savedBreakdown
+    }
     if (localStorage.getItem('tp.scope') === 'worktree') currentScope = 'worktree'
     const savedGroups = localStorage.getItem('tp.collapsedGroups')
     if (savedGroups) {
@@ -1877,6 +2023,8 @@ function initBrowserPanel(): void {
       tab: currentTab,
       scope: currentScope,
       locale,
+      lastPeriodTab,
+      statsBreakdown,
       selectedLiveAgentKey,
       liveDetailAgent,
       isRefreshing,
@@ -1999,6 +2147,7 @@ function initBrowserPanel(): void {
           return
         }
         currentTab = nextTab
+        if (isPeriodTab(nextTab)) lastPeriodTab = nextTab
         if (currentTab !== 'live') {
           selectedLiveAgentKey = null
           liveDetailAgent = null
@@ -2024,6 +2173,21 @@ function initBrowserPanel(): void {
         // Ignore
       }
       renderApp()
+      return
+    }
+
+    const breakdownBtn = target.closest<HTMLButtonElement>('[data-breakdown]')
+    if (breakdownBtn) {
+      const nextMode = breakdownBtn.dataset.breakdown
+      if (nextMode === 'agent' || nextMode === 'model' || nextMode === 'project') {
+        statsBreakdown = nextMode
+        try {
+          localStorage.setItem('tp.statsBreakdown', statsBreakdown)
+        } catch {
+          // Ignore
+        }
+        renderApp()
+      }
       return
     }
 

@@ -299,6 +299,14 @@ body {
   background: rgba(128, 140, 160, 0.18);
 }
 
+.tp-period-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .tp-worktree-pill {
   display: inline-flex;
   align-items: center;

@@ -767,9 +767,9 @@ describe('Aggregator, Left-Sidebar Project/Worktree Focus, Pure-Icon UI & i18n',
     const navBtnMatches = [
       ...htmlSessions.matchAll(/<button[^>]*class="(tp-nav-btn[^"]*)"[^>]*>([\s\S]*?)<\/button>/g)
     ]
-    assert.equal(navBtnMatches.length, 6)
+    assert.equal(navBtnMatches.length, 4)
     const navTabs = navBtnMatches.map((m) => m[0].match(/data-tab="([^"]+)"/)?.[1])
-    assert.deepEqual(navTabs, ['live', 'sessions', 'day', 'week', 'month', 'quotas'])
+    assert.deepEqual(navTabs, ['live', 'sessions', 'day', 'quotas'])
     let activeNavCount = 0
     for (const m of navBtnMatches) {
       const cls = m[1]
@@ -4069,4 +4069,71 @@ test('renderDashboardShellHtml renders shared session race track only for active
   snap.live.agents = [makeAgent('antigravity:s3', 'done', 'Finished session', 0)]
   const idleHtml = renderDashboardShellHtml({ snap, tab: 'live', scope: 'all', locale: 'en', nowMs: now })
   assert.ok(!idleHtml.includes('class="tp-race-card"'))
+})
+
+test('Stats view consolidates Day/Week/Month into 4 primary tabs and renders Agent/Model/Project breakdowns', () => {
+  const now = Date.now()
+  const snap = createQuotaTestSnapshot(undefined, now)
+  snap.periods.all.day = {
+    tokens: { input: 1000, output: 500, reasoning: 0, cacheRead: 200, cacheWrite: 0, total: 1700, costUsd: 1.25 },
+    tps: { liveTps: 40, avgTps: 35, peakTps: 60 },
+    previousTotalTokens: 1000,
+    deltaPercent: 70,
+    buckets: [],
+    byAgent: [
+      {
+        agent: 'antigravity',
+        providerLabel: 'Google',
+        sharePercent: 100,
+        tokens: { input: 1000, output: 500, reasoning: 0, cacheRead: 200, cacheWrite: 0, total: 1700, costUsd: 1.25 },
+        tps: { liveTps: 40, avgTps: 35, peakTps: 60 },
+        topModel: 'gemini-4-neon'
+      }
+    ],
+    byModel: [
+      {
+        modelLabel: 'gemini-4-neon',
+        providerLabel: 'Google',
+        agent: 'antigravity',
+        sharePercent: 100,
+        tokens: { input: 1000, output: 500, reasoning: 0, cacheRead: 200, cacheWrite: 0, total: 1700, costUsd: 1.25 },
+        tps: { liveTps: 40, avgTps: 35, peakTps: 60 }
+      }
+    ],
+    byProject: [
+      {
+        projectKey: 'orca-token-used / main',
+        label: 'orca-token-used / main',
+        sharePercent: 100,
+        tokens: { input: 1000, output: 500, reasoning: 0, cacheRead: 200, cacheWrite: 0, total: 1700, costUsd: 1.25 },
+        sessionCount: 3
+      }
+    ]
+  }
+
+  const modelHtml = renderDashboardShellHtml({
+    snap,
+    tab: 'day',
+    scope: 'all',
+    locale: 'en',
+    statsBreakdown: 'model',
+    nowMs: now
+  })
+  assert.ok(modelHtml.includes('data-tab="day"'))
+  assert.ok(modelHtml.includes('data-tab="week"'))
+  assert.ok(modelHtml.includes('data-tab="month"'))
+  assert.ok(modelHtml.includes('<span class="tp-nav-label">Stats</span>'))
+  assert.ok(modelHtml.includes('data-breakdown="model"'))
+  assert.ok(modelHtml.includes('gemini-4-neon'))
+
+  const projectHtml = renderDashboardShellHtml({
+    snap,
+    tab: 'day',
+    scope: 'all',
+    locale: 'en',
+    statsBreakdown: 'project',
+    nowMs: now
+  })
+  assert.ok(projectHtml.includes('orca-token-used / main'))
+  assert.ok(projectHtml.includes(`3 ${getMessages('en').sessionsCountSuffix}`))
 })
