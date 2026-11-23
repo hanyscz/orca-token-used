@@ -69,7 +69,6 @@ const BRAND_EMBLEM_SVG = `<svg viewBox="0 0 24 24" fill="none"><path class="tp-w
 
 
 const REFRESH_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>`
-const DOLLAR_SYNC_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>`
 
 const WAVE_SECONDS = 60
 
@@ -403,12 +402,23 @@ export function renderIoWaveformSvg(
   return { html, scaleMax }
 }
 
+export function computeCacheHitPercent(tokens: TokenBreakdown): number | null {
+  const denom = tokens.input + tokens.cacheRead + tokens.cacheWrite
+  if (denom < 1000) return null
+  return Math.max(0, Math.min(100, Math.round((tokens.cacheRead / denom) * 100)))
+}
+
 export function renderLiveAgentDetailHtml(agent: LiveAgentCard, msg: UiMessages): string {
   const providerModel = `${agent.providerLabel} · ${agent.modelLabel}`
   const projWt = formatProjectWorktreeLabel(agent.projectName, agent.workspaceName)
   const outTotal = Math.max(0, agent.tokens.output + agent.tokens.reasoning)
   const inTotal = Math.max(0, agent.tokens.input + agent.tokens.cacheWrite)
   const cacheTotal = Math.max(0, agent.tokens.cacheRead)
+  const cacheHitPct = computeCacheHitPercent(agent.tokens)
+  const cacheHitHtml =
+    cacheHitPct !== null
+      ? `<span class="tp-cache-hit${cacheHitPct < 50 ? ' tp-cache-hit-low' : ''}" data-io-text="cache-hit">${escapeHtml(msg.cacheShort)} ${cacheHitPct}%</span>`
+      : ''
 
   const outWave = renderIoWaveformSvg(agent.outSeries, 'out')
   const inWave = renderIoWaveformSvg(agent.inSeries, 'in')
@@ -416,20 +426,10 @@ export function renderLiveAgentDetailHtml(agent: LiveAgentCard, msg: UiMessages)
   return `
     <div class="tp-io-monitor" data-detail-session-key="${escapeHtml(agent.sessionKey)}">
       <div class="tp-io-topbar">
+        <button type="button" class="tp-io-back-btn" data-live-back="1" aria-label="Back">← ${escapeHtml(msg.navShort.live)}</button>
         <span class="tp-live-1s-pill">
           <span class="tp-live-1s-dot"></span>${escapeHtml(msg.live1sBadge)}
         </span>
-      </div>
-
-      <div class="tp-io-hero-rates" role="group" aria-label="${escapeHtml(`${msg.outputStreamLabel} / ${msg.inputStreamLabel}`)}">
-        <div class="tp-io-rate-card tp-io-rate-output">
-          <span class="tp-io-rate-label">${escapeHtml(msg.outputStreamLabel)}</span>
-          <strong class="tp-io-rate-value" data-io-text="hero-out">${escapeHtml(formatRateTokPerSec(agent.liveOutRate))}</strong>
-        </div>
-        <div class="tp-io-rate-card tp-io-rate-input">
-          <span class="tp-io-rate-label">${escapeHtml(msg.inputStreamLabel)}</span>
-          <strong class="tp-io-rate-value" data-io-text="hero-in">${escapeHtml(formatRateTokPerSec(agent.liveInRate))}</strong>
-        </div>
       </div>
 
       <div class="tp-io-meta-stack">
@@ -452,6 +452,7 @@ export function renderLiveAgentDetailHtml(agent: LiveAgentCard, msg: UiMessages)
           <span>${escapeHtml(msg.outputShort)} <strong data-io-text="tok-out">${formatTokens(outTotal)}</strong></span>
           <span>${escapeHtml(msg.inputShort)} <strong data-io-text="tok-in">${formatTokens(inTotal)}</strong></span>
           <span>${escapeHtml(msg.cacheShort)} <strong data-io-text="tok-cache">${formatTokens(cacheTotal)}</strong></span>
+          ${cacheHitHtml}
           <span>${escapeHtml(msg.costShort)} <span class="tp-cost-pill" data-io-text="cost">${formatUsd(agent.tokens.costUsd)}</span></span>
         </div>
       </div>
@@ -645,7 +646,12 @@ function renderLiveView(
         <div class="tp-row-between" style="font-size:11px;color:var(--tp-muted)">
           <span class="tp-project-tag" title="${escapeHtml(a.workspacePath || projWt)}">${escapeHtml(projWt)}</span>
           <span>
-            <strong style="color:var(--tp-fg);font-family:var(--tp-font-mono)">${formatTokens(a.tokens.total)}</strong> tok ·
+            ${(() => {
+              const hit = computeCacheHitPercent(a.tokens)
+              return hit !== null && a.tokens.total >= 5000
+                ? `<span class="tp-cache-hit${hit < 50 ? ' tp-cache-hit-low' : ''}">${escapeHtml(msg.cacheShort)} ${hit}%</span> · `
+                : ''
+            })()}<strong style="color:var(--tp-fg);font-family:var(--tp-font-mono)">${formatTokens(a.tokens.total)}</strong> tok ·
             <span class="tp-cost-pill">${formatUsd(a.tokens.costUsd)}</span>
           </span>
         </div>
@@ -823,30 +829,7 @@ function renderSessionsView(
       })
       .join('')}</div>`
 
-  const active = list.filter((session) => session.active)
-  const recent = list.filter((session) => !session.active)
-  const groups = [
-    active.length > 0
-      ? renderCollapseGroup(
-          'sessions:active',
-          msg.activeBadge,
-          active.length,
-          renderSessionItems(active),
-          collapsedGroups['sessions:active'] ?? false
-        )
-      : '',
-    recent.length > 0
-      ? renderCollapseGroup(
-          'sessions:recent',
-          msg.sortedNewestHint,
-          recent.length,
-          renderSessionItems(recent),
-          collapsedGroups['sessions:recent'] ?? true
-        )
-      : ''
-  ].join('')
-
-  return `${summaryStrip}${groups}`
+  return `${summaryStrip}${renderSessionItems(list)}`
 }
 
 function renderPeriodView(
@@ -883,14 +866,22 @@ function renderPeriodView(
           )
           .join('')}
       </div>
-      ${
-        scope === 'worktree' && (snap.workspace.project || snap.workspace.name)
-          ? `<span class="tp-worktree-pill">${escapeHtml(
-              formatProjectWorktreeLabel(snap.workspace.project, snap.workspace.name, snap.workspace.branch)
-            )}</span>`
-          : ''
-      }
+      <div class="tp-scope-switch">
+        <button type="button" class="tp-scope-btn ${scope === 'all' ? 'active' : ''}" data-scope="all">
+          ${escapeHtml(msg.scopeAll)}
+        </button>
+        <button type="button" class="tp-scope-btn ${scope === 'worktree' ? 'active' : ''}" data-scope="worktree">
+          ${escapeHtml(msg.scopeWorktree)}
+        </button>
+      </div>
     </div>
+    ${
+      scope === 'worktree' && (snap.workspace.project || snap.workspace.name)
+        ? `<div class="tp-kpi-meta" style="margin-top:-2px">${escapeHtml(
+            formatProjectWorktreeLabel(snap.workspace.project, snap.workspace.name, snap.workspace.branch)
+          )}</div>`
+        : ''
+    }
   `
 
   const kpiHtml = `
@@ -1499,31 +1490,6 @@ export function renderDashboardShellHtml(params: {
             : null)
       : null
 
-  let rightControlHtml = ''
-  if (tab === 'day' || tab === 'week' || tab === 'month') {
-    rightControlHtml = `
-      <div class="tp-scope-switch">
-        <button type="button" class="tp-scope-btn ${scope === 'all' ? 'active' : ''}" data-scope="all">
-          ${escapeHtml(msg.scopeAll)}
-        </button>
-        <button type="button" class="tp-scope-btn ${scope === 'worktree' ? 'active' : ''}" data-scope="worktree">
-          ${escapeHtml(msg.scopeWorktree)}
-        </button>
-      </div>
-    `
-  } else if (tab === 'quotas') {
-    rightControlHtml = ''
-  } else if (snap?.workspace.name || snap?.workspace.project) {
-    const wtText = formatProjectWorktreeLabel(
-      snap.workspace.project,
-      snap.workspace.name,
-      snap.workspace.branch
-    )
-    rightControlHtml = `<span class="tp-worktree-pill" title="${escapeHtml(snap.workspace.path || wtText)}">${escapeHtml(wtText)}</span>`
-  } else {
-    rightControlHtml = `<span class="tp-worktree-pill">${escapeHtml(msg.allWorkspacesFallback)}</span>`
-  }
-
   let mainBodyHtml = `<div class="tp-empty">${escapeHtml(tab === 'quotas' ? msg.quotaLoadingLabel : 'Loading…')}</div>`
   let pricingFooterHtml = ''
 
@@ -1561,27 +1527,22 @@ export function renderDashboardShellHtml(params: {
 
     pricingFooterHtml = `
       <div class="tp-footer">
-        <span>
+        <button
+          type="button"
+          id="btn-sync-pricing"
+          class="tp-footer-sync-btn ${isSyncingPricing ? 'tp-spinning' : ''}"
+          title="${escapeHtml(msg.syncPricingTooltip)}"
+          aria-label="${escapeHtml(msg.syncPricingTooltip)}"
+        >
           <i class="tp-dot" style="background:${p.source === 'online' ? '#10b981' : '#f59e0b'}"></i>
-          ${escapeHtml(pSourceLabel)}${syncTime ? ` · ${escapeHtml(syncTime)}` : ''}
-        </span>
+          <span>${escapeHtml(pSourceLabel)}${syncTime ? ` · ${escapeHtml(syncTime)}` : ''}</span>
+        </button>
         <span title="${escapeHtml(msg.pricingModelsTooltip)}">${escapeHtml(msg.pricingModelsLoaded(p.modelCount))}</span>
       </div>
     `
   }
 
   const anyWorking = Boolean(snap?.live.agents.some((a) => a.state === 'working'))
-  const subheaderHtml = resolvedExpandedAgent
-    ? ''
-    : `
-    <div class="tp-subheader">
-      <div class="tp-view-heading">
-        <div class="tp-view-name">${escapeHtml(msg.tabs[tab])}</div>
-        ${tab === 'live' ? '' : `<div class="tp-view-sub">${escapeHtml(msg.tabSubtitles[tab])}</div>`}
-      </div>
-      ${rightControlHtml}
-    </div>
-  `
 
   return `
     <header class="tp-header">
@@ -1590,15 +1551,6 @@ export function renderDashboardShellHtml(params: {
         <h1 class="tp-title">${escapeHtml(msg.appTitle)}</h1>
       </div>
       <div class="tp-header-actions">
-        <button
-          type="button"
-          id="btn-sync-pricing"
-          class="tp-icon-btn ${isSyncingPricing ? 'tp-spinning' : ''}"
-          title="${escapeHtml(msg.syncPricingTooltip)}"
-          aria-label="${escapeHtml(msg.syncPricingTooltip)}"
-        >
-          ${DOLLAR_SYNC_SVG}
-        </button>
         <button
           type="button"
           id="btn-refresh"
@@ -1616,8 +1568,6 @@ export function renderDashboardShellHtml(params: {
         ${navButtonsHtml}
       </nav>
     </div>
-
-    ${subheaderHtml}
 
     <main style="display:flex;flex-direction:column;gap:8px">
       ${mainBodyHtml}
@@ -1973,8 +1923,6 @@ function initBrowserPanel(): void {
     const inTotal = Math.max(0, agent.tokens.input + agent.tokens.cacheWrite)
     const cacheTotal = Math.max(0, agent.tokens.cacheRead)
 
-    setIoText(detailRoot, 'hero-out', formatRateTokPerSec(agent.liveOutRate))
-    setIoText(detailRoot, 'hero-in', formatRateTokPerSec(agent.liveInRate))
     setIoText(detailRoot, 'out-rate', formatRateTokPerSec(agent.liveOutRate))
     setIoText(detailRoot, 'in-rate', formatRateTokPerSec(agent.liveInRate))
     setIoText(detailRoot, 'state-label', msg.states[agent.state])
@@ -1986,6 +1934,10 @@ function initBrowserPanel(): void {
     setIoText(detailRoot, 'tok-out', formatTokens(outTotal))
     setIoText(detailRoot, 'tok-in', formatTokens(inTotal))
     setIoText(detailRoot, 'tok-cache', formatTokens(cacheTotal))
+    const cacheHit = computeCacheHitPercent(agent.tokens)
+    if (cacheHit !== null) {
+      setIoText(detailRoot, 'cache-hit', `${msg.cacheShort} ${cacheHit}%`)
+    }
     setIoText(detailRoot, 'cost', formatUsd(agent.tokens.costUsd))
 
     const stateWrap = detailRoot.querySelector<HTMLElement>('[data-io-state-wrap]')
@@ -2125,6 +2077,11 @@ function initBrowserPanel(): void {
   appRoot.addEventListener('click', async (ev) => {
     const target = ev.target as HTMLElement | null
     if (!target) return
+
+    if (target.closest('[data-live-back]')) {
+      selectLiveAgent(null)
+      return
+    }
 
     const liveCard = target.closest<HTMLElement>('[data-live-agent-key], [data-race-agent-key]')
     if (liveCard && currentTab === 'live') {

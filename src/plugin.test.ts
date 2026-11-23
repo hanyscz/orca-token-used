@@ -17,6 +17,7 @@ import {
   normalizeConfiguredModelSlug
 } from './journal'
 import {
+  computeCacheHitPercent,
   escapeHtml,
   formatProjectWorktreeLabel,
   renderDashboardShellHtml,
@@ -2861,7 +2862,6 @@ describe('Quotas & Limits Tab UI Rendering (renderDashboardShellHtml)', () => {
 
       assert.ok(html.includes(escapeHtml(msg.tabs.quotas)), `${locale}: missing tabs.quotas`)
       assert.ok(html.includes(escapeHtml(msg.navShort.quotas)), `${locale}: missing navShort.quotas`)
-      assert.ok(html.includes(escapeHtml(msg.tabSubtitles.quotas)), `${locale}: missing tabSubtitles.quotas`)
       assert.ok(html.includes(escapeHtml(msg.quotaSourceLive)), `${locale}: missing quotaSourceLive`)
       assert.ok(html.includes(escapeHtml(msg.quotaRefreshAction)), `${locale}: missing quotaRefreshAction`)
       assert.ok(html.includes(escapeHtml(msg.quota5hLabel)), `${locale}: missing quota5hLabel`)
@@ -4136,4 +4136,85 @@ test('Stats view consolidates Day/Week/Month into 4 primary tabs and renders Age
   })
   assert.ok(projectHtml.includes('orca-token-used / main'))
   assert.ok(projectHtml.includes(`3 ${getMessages('en').sessionsCountSuffix}`))
+})
+
+test('decluttered views remove subheaders & hero rate duplication, flatten Sessions, move pricing sync to footer, and display cache hit rate', () => {
+  assert.equal(
+    computeCacheHitPercent({ input: 200, output: 100, reasoning: 0, cacheRead: 1800, cacheWrite: 0, total: 2100, costUsd: 0.1 }),
+    90
+  )
+  assert.equal(
+    computeCacheHitPercent({ input: 2000, output: 100, reasoning: 0, cacheRead: 500, cacheWrite: 0, total: 2600, costUsd: 0.1 }),
+    20
+  )
+  assert.equal(
+    computeCacheHitPercent({ input: 100, output: 50, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 150, costUsd: 0 }),
+    null
+  )
+
+  const now = Date.now()
+  const snap = createQuotaTestSnapshot(undefined, now)
+  snap.live.agents = [
+    {
+      id: 'antigravity:low-cache',
+      sessionKey: 'antigravity:low-cache',
+      title: 'Low cache session',
+      agent: 'antigravity',
+      state: 'working',
+      terminalId: null,
+      providerLabel: 'Google',
+      modelLabel: 'gemini-4-neon',
+      projectName: 'proj',
+      workspaceName: 'main',
+      workspacePath: '/tmp/proj',
+      updatedAt: now,
+      liveOutRate: 42,
+      liveInRate: 12,
+      tokens: { input: 6000, output: 500, reasoning: 0, cacheRead: 1000, cacheWrite: 0, total: 7500, costUsd: 0.45 },
+      tps: { avgTps: 30, peakTps: 50, liveTps: 42 },
+      sparkline: [0, 42],
+      outSeries: [0, 42],
+      inSeries: [0, 12]
+    }
+  ]
+
+  const liveHtml = renderDashboardShellHtml({ snap, tab: 'live', scope: 'all', locale: 'en', nowMs: now })
+  assert.ok(!liveHtml.includes('tp-subheader'))
+  assert.ok(liveHtml.includes('class="tp-footer-sync-btn'))
+  assert.ok(liveHtml.includes('tp-cache-hit-low'))
+  assert.ok(liveHtml.includes('Cache 14%'))
+
+  const detailHtml = renderDashboardShellHtml({
+    snap,
+    tab: 'live',
+    scope: 'all',
+    locale: 'en',
+    selectedLiveAgentKey: 'antigravity:low-cache',
+    nowMs: now
+  })
+  assert.ok(!detailHtml.includes('tp-io-hero-rates'))
+  assert.ok(detailHtml.includes('data-live-back="1"'))
+  assert.ok(detailHtml.includes('data-io-text="cache-hit"'))
+
+  snap.sessions = [
+    {
+      sessionId: 'sess-1',
+      agent: 'antigravity',
+      providerLabel: 'Google',
+      modelLabel: 'gemini-4-neon',
+      title: 'Flat session item',
+      projectName: 'proj',
+      workspaceName: 'main',
+      workspacePath: '/tmp/proj',
+      updatedAt: now,
+      createdAt: now - 1000,
+      active: false,
+      tps: { avgTps: 20, peakTps: 30, liveTps: 0 },
+      tokens: { input: 1000, output: 500, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 1500, costUsd: 0.05 }
+    }
+  ]
+  const sessionsHtml = renderDashboardShellHtml({ snap, tab: 'sessions', scope: 'all', locale: 'en', nowMs: now })
+  assert.ok(!sessionsHtml.includes('sessions:recent'))
+  assert.ok(!sessionsHtml.includes('sessions:active'))
+  assert.ok(sessionsHtml.includes('Flat session item'))
 })

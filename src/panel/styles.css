@@ -1058,6 +1058,48 @@ html.light .tp-cost-pill {
   gap: 8px;
 }
 
+.tp-io-back-btn {
+  border: 1px solid var(--tp-border);
+  background: var(--tp-card);
+  color: var(--tp-fg);
+  border-radius: 7px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tp-io-back-btn:hover {
+  border-color: rgba(16, 185, 129, 0.45);
+}
+
+.tp-cache-hit {
+  font-family: var(--tp-font-mono);
+  font-size: 10.5px;
+  color: var(--tp-muted);
+}
+
+.tp-cache-hit-low {
+  color: #f59e0b;
+  font-weight: 700;
+}
+
+.tp-footer-sync-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+.tp-footer-sync-btn:hover {
+  color: var(--tp-fg);
+}
+
 .tp-live-1s-pill {
   display: inline-flex;
   align-items: center;

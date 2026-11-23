@@ -86,6 +86,24 @@
         "default": 2,
         "minimum": 1,
         "maximum": 10
+      },
+      {
+        "key": "dailyBudgetUsd",
+        "title": "Daily spend alert threshold (USD, 0 = off)",
+        "description": "Notify and warn in status bar when today's estimated spend reaches this USD amount.",
+        "type": "number",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 10000
+      },
+      {
+        "key": "quotaAlertPercent",
+        "title": "Quota alert threshold (%, 0 = off)",
+        "description": "Notify and warn in status bar when any provider 5h or weekly quota reaches this percentage.",
+        "type": "integer",
+        "default": 85,
+        "minimum": 0,
+        "maximum": 100
       }
     ],
     "statusBarItems": [
@@ -117,6 +135,9 @@
     },
     {
       "kind": "settings:own"
+    },
+    {
+      "kind": "notifications:show"
     }
   ]
 }
