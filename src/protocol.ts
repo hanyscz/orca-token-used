@@ -223,7 +223,8 @@ export interface QuotaProviderSnapshot {
 }
 
 export interface QuotasSnapshot {
-  source: 'live' | 'cache' | 'loading' | 'error'
+  /** `disabled`: every quota provider is switched off in the plugin settings. */
+  source: 'live' | 'cache' | 'loading' | 'error' | 'disabled'
   syncedAt: number | null
   refreshing: boolean
   lastError: string | null
@@ -243,6 +244,8 @@ export interface DashboardSnapshot {
   workspace: WorkspaceFocusInfo
   pricing: PricingStatus
   quotas?: QuotasSnapshot
+  /** Agents switched off in the plugin settings; the panel drops any open detail of them. */
+  disabledAgents?: AgentKind[]
   live: {
     tokens: TokenBreakdown
     tps: TpsStats
