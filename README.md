@@ -22,6 +22,7 @@ The plugin uses Orca's `trusted-worker` profile. Orca will show the requested ac
 - Current model labels and provider-aware USD estimates.
 - 5-hour and weekly (7-day) quota gauges across Codex, Antigravity (Gemini and Claude/GPT model pools), and Claude, paired with local rolling 5h/7d token and USD usage.
 - Online pricing refresh from OpenRouter and models.dev, with offline built-in rates.
+- Localized panel UI in Traditional Chinese, Simplified Chinese, English, Japanese, Korean, and Czech.
 - Light and dark Orca themes.
 
 ## Reading Live TPS

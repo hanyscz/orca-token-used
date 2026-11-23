@@ -2,6 +2,13 @@
 
 All notable changes to Token Pulse are documented in this file.
 
+## [0.1.9] - 2026-11-23
+
+### Added
+
+- Add Czech (`cs`, `cs-CZ`, `cs_CZ`) UI localization for the dashboard panel
+  (#5, @hanyscz).
+
 ## [0.1.8] - 2026-11-20
 
 ### Fixed
