@@ -184,6 +184,15 @@ body {
 }
 
 /* Adaptive Navigation Bar: Inactive = Icon Only, Active = Icon + Label */
+.tp-nav-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--tp-bg);
+  margin: -6px -12px 0;
+  padding: 6px 12px;
+}
+
 .tp-nav {
   display: flex;
   align-items: center;
@@ -310,7 +319,7 @@ body {
 /* KPI Grid & Cards */
 .tp-live-kpi-sticky {
   position: sticky;
-  top: 0;
+  top: 49px;
   z-index: 10;
   display: flex;
   flex-direction: column;

@@ -1462,9 +1462,11 @@ export function renderDashboardShellHtml(params: {
       </div>
     </header>
 
-    <nav class="tp-nav" role="tablist">
-      ${navButtonsHtml}
-    </nav>
+    <div class="tp-nav-sticky">
+      <nav class="tp-nav" role="tablist">
+        ${navButtonsHtml}
+      </nav>
+    </div>
 
     ${subheaderHtml}
 

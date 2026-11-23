@@ -3982,6 +3982,7 @@ test('renderDashboardShellHtml merges orphan subagents into the same status grou
     nowMs: now
   })
 
+  assert.ok(html.includes('class="tp-nav-sticky"'))
   assert.ok(html.includes('class="tp-live-kpi-sticky"'))
   assert.ok(html.includes('ACTIVE &amp; RECENT AGENTS (5)'))
   assert.equal((html.match(/data-collapse-key="live:done"/g) ?? []).length, 1)
