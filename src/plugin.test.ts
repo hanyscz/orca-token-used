@@ -3934,3 +3934,59 @@ test('enriches local usage with scoped public history without counting remote or
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('renderDashboardShellHtml merges orphan subagents into the same status group without duplicate DONE headers', () => {
+  const now = Date.now()
+  const snap = createQuotaTestSnapshot(undefined, now)
+  const makeAgent = (
+    key: string,
+    state: DashboardSnapshot['live']['agents'][number]['state'],
+    title: string,
+    parentSessionKey?: string
+  ): DashboardSnapshot['live']['agents'][number] => ({
+    id: key,
+    sessionKey: key,
+    parentSessionKey,
+    title,
+    agent: 'antigravity',
+    state,
+    terminalId: null,
+    providerLabel: 'Google',
+    modelLabel: 'gemini-4-flash',
+    projectName: 'proj',
+    workspaceName: 'main',
+    workspacePath: '/tmp/proj',
+    updatedAt: now,
+    liveOutRate: 0,
+    tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150, costUsd: 0.01 },
+    tps: { avgTps: 10, peakTps: 20, liveTps: 0 },
+    sparkline: [0, 0, 0],
+    io: { outSeries: [0], inSeries: [0], liveOutRate: 0, liveInRate: 0, peakOutRate: 0, peakInRate: 0 }
+  })
+
+  snap.live.agents = [
+    makeAgent('antigravity:working-1', 'working', 'Active Root'),
+    makeAgent('antigravity:done-1', 'done', 'Done Root 1'),
+    makeAgent('antigravity:done-2', 'done', 'Done Root 2')
+  ]
+  snap.live.subagents = [
+    makeAgent('antigravity:orphan-1', 'done', 'Orphan Subagent 1', 'antigravity:expired-parent'),
+    makeAgent('antigravity:orphan-2', 'done', 'Orphan Subagent 2', 'antigravity:expired-parent')
+  ]
+
+  const html = renderDashboardShellHtml({
+    snap,
+    tab: 'live',
+    scope: 'all',
+    locale: 'en',
+    nowMs: now
+  })
+
+  assert.ok(html.includes('ACTIVE &amp; RECENT AGENTS (5)'))
+  assert.equal((html.match(/data-collapse-key="live:done"/g) ?? []).length, 1)
+  assert.ok(!html.includes('subagents:orphan:'))
+  assert.ok(html.includes('<span>done (4)</span>'))
+  assert.ok(html.includes('tp-subagent-orphans'))
+  assert.ok(html.includes('Orphan Subagent 1'))
+  assert.ok(html.includes('Done Root 1'))
+})

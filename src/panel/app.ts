@@ -711,35 +711,24 @@ function renderLiveView(
       ? `<div class="tp-empty">${escapeHtml(msg.noLiveAgents)}</div>`
       : groupOrder
           .map((state) => {
-            const items = agents.filter((agent) => agent.state === state)
-            if (items.length === 0) return ''
+            const rootItems = agents.filter((agent) => agent.state === state)
+            const orphanItems = orphanSubagents.filter((agent) => agent.state === state)
+            const totalItems = rootItems.length + orphanItems.length
+            if (totalItems === 0) return ''
             const key = `live:${state}`
+            const content = [
+              rootItems.length > 0 ? renderAgentCards(rootItems) : '',
+              orphanItems.length > 0 ? renderAgentCards(orphanItems, true) : ''
+            ].join('')
             return renderCollapseGroup(
               key,
               msg.states[state],
-              items.length,
-              renderAgentCards(items),
+              totalItems,
+              content,
               collapsedGroups[key] ?? state === 'done'
             )
           })
           .join('')
-  const orphanSubagentHtml =
-    orphanSubagents.length > 0
-      ? groupOrder
-          .map((state) => {
-            const items = orphanSubagents.filter((agent) => agent.state === state)
-            if (items.length === 0) return ''
-            const key = `subagents:orphan:${state}`
-            return renderCollapseGroup(
-              key,
-              msg.states[state],
-              items.length,
-              renderAgentCards(items, true),
-              collapsedGroups[key] ?? state === 'done'
-            )
-          })
-          .join('')
-      : ''
 
   return `
     ${kpiHtml}
@@ -748,7 +737,6 @@ function renderLiveView(
       ${rootCount > 0 ? `<span class="tp-section-hint">${escapeHtml(msg.clickToInspectHint)}</span>` : ''}
     </div>
     ${cardsHtml}
-    ${orphanSubagentHtml}
   `
 }
 
