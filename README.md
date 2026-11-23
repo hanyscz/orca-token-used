@@ -14,13 +14,17 @@ The plugin uses Orca's `trusted-worker` profile. Orca will show the requested ac
 
 ## Features
 
-- Live output and input token rates with 60-second waveforms.
-- Session, day, week, and month token summaries, plus today's cumulative cost in the live dashboard.
+- Compact 4-tab navigation (**Live**, **Sessions**, **Stats** with Today/Week/Month switcher, and **Quotas**) with a sticky tab bar and sticky Live KPI header while scrolling.
+- Shared **Live Race** track showing active runtime sessions with deterministic, collision-free SVG mascots (up to 384 unique animal/palette/accessory combinations), speed leader crown, state indicators, and click-to-focus navigation.
+- Live output and input token rates with 60-second waveforms and inline back navigation.
+- Session, day, week, and month token summaries with **Agent**, **Model**, and **Project** breakdowns, plus today's cumulative cost in the live dashboard.
+- Inline **Cache hit rate** (`Cache XX%`, highlighted below 50%) across Live cards, Live I/O detail, Sessions history, and Stats summaries.
 - Claude Code, Codex, Gemini CLI, and Antigravity transcript parsing with provider logos and reasoning effort badges.
-- Nested subagent cards under parent sessions with parent status elevation while child subagents are active, plus collapsible session groups.
+- Nested subagent cards under parent sessions with parent status elevation while child subagents are active, unified status groups, and flattened worktree session history.
 - Orca agent and terminal titles from the host API, with click-to-focus navigation for linked terminals.
-- Current model labels and provider-aware USD estimates.
+- Current model labels and provider-aware USD estimates, with one-click pricing sync in the footer.
 - 5-hour and weekly (7-day) quota gauges across Codex, Antigravity (Gemini and Claude/GPT model pools), and Claude, paired with local rolling 5h/7d token and USD usage.
+- Status-bar summary with quota waterlines in the tooltip and configurable warning/danger tone thresholds for daily spend and quota usage.
 - Online pricing refresh from OpenRouter and models.dev, with offline built-in rates.
 - Localized panel UI in Traditional Chinese, Simplified Chinese, English, Japanese, Korean, and Czech.
 - Light and dark Orca themes.
@@ -95,6 +99,8 @@ Transcript contents, prompts, responses, and local paths are not sent to those e
 | --- | ---: | --- |
 | Live pricing sync interval | 6 hours | How often online model rates are refreshed. |
 | Live transcript refresh interval | 2 seconds | How often active transcripts are tailed. |
+| Daily spend warning threshold | $0 (off) | Highlights the status bar in danger tone when today's estimated spend reaches this USD amount. |
+| Quota warning threshold | 85% | Highlights the status bar in warning/danger tone when any provider 5h or weekly quota reaches this percentage (0 = off). |
 
 ## Development
 

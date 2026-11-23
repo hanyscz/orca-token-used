@@ -2,6 +2,25 @@
 
 All notable changes to Token Pulse are documented in this file.
 
+## [0.2.0] - 2026-11-23
+
+### Added
+
+- **Shared Live Race track**: Added a compact single-track runtime session race bar in the Live view with a parametric SVG mascot generator (8 species × 8 palettes × 6 accessories = 384 unique combinations) using collision-free assignment per active `sessionKey`, leader crown for active token output (`> 0 tok/s`), thinking/waiting indicators, hover tooltips, matching card avatars, and click-to-focus navigation.
+- **Model & Project breakdowns in Stats**: Added `byModel` and `byProject` aggregation in `PeriodSummary` and an inline `Agent | Model | Project` switcher in the Stats breakdown card.
+- **Cache hit rate indicators**: Added inline `Cache XX%` hit-rate indicators (highlighted in amber below 50%) on Live agent cards, Live I/O detail view (updated live at 1s), Sessions cards, and Stats period summaries.
+- **Status bar quota waterlines & spend/quota thresholds**: Added `dailyBudgetUsd` and `quotaAlertPercent` settings to highlight the status bar in `warning`/`danger` tone and display quota waterlines in the status bar tooltip without requiring additional capabilities.
+
+### Changed
+
+- **4-tab navigation**: Consolidated the 6 navigation tabs into 4 primary tabs (**Live**, **Sessions**, **Stats**, **Quotas**), moving the `Today | Week | Month` switcher alongside `All | Worktree` inside **Stats**.
+- **Sticky top navigation & Live KPI header**: Pinned the tab bar and Live KPI summary at the top while scrolling the agent list underneath.
+- **UI decluttering**: Removed redundant page subheaders, merged the duplicate `ACTIVE TOKENS` summary card into a compact tricolor bar, moved the pricing sync action into the clickable footer, removed duplicate hero rate cards from the Live I/O detail view while adding a `← Live` back button, and flattened the Sessions list.
+
+### Fixed
+
+- **Unified status groups for orphan subagents**: Merged orphaned subagents into the same `WORKING` / `WAITING` / `BLOCKED` / `DONE` collapse groups as root agents to eliminate duplicate status group headers.
+
 ## [0.1.9] - 2026-11-23
 
 ### Added
