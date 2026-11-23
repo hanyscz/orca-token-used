@@ -59,7 +59,7 @@ body {
   font-size: 12.5px;
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 .tp-shell {
@@ -308,6 +308,19 @@ body {
 }
 
 /* KPI Grid & Cards */
+.tp-live-kpi-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--tp-bg);
+  margin: -6px -12px 0;
+  padding: 6px 12px 8px;
+  border-bottom: 1px solid var(--tp-border);
+}
+
 .tp-kpi-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

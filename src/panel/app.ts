@@ -563,25 +563,27 @@ function renderLiveView(
   const todayCost = snap.periods.all.day.tokens.costUsd
 
   const kpiHtml = `
-    <div class="tp-kpi-grid">
-      <div class="tp-card">
-        <div class="tp-kpi-label">${escapeHtml(msg.liveTpsLabel)}</div>
-        <div class="tp-kpi-value tp-kpi-tps">${tps.liveTps.toFixed(1)} <span style="font-size:12px;font-weight:600">tok/s</span></div>
-        <div class="tp-kpi-meta">${escapeHtml(msg.peakLabel)} ${tps.peakTps.toFixed(1)} · ${escapeHtml(msg.avgLabel)} ${tps.avgTps.toFixed(1)}</div>
+    <div class="tp-live-kpi-sticky">
+      <div class="tp-kpi-grid">
+        <div class="tp-card">
+          <div class="tp-kpi-label">${escapeHtml(msg.liveTpsLabel)}</div>
+          <div class="tp-kpi-value tp-kpi-tps">${tps.liveTps.toFixed(1)} <span style="font-size:12px;font-weight:600">tok/s</span></div>
+          <div class="tp-kpi-meta">${escapeHtml(msg.peakLabel)} ${tps.peakTps.toFixed(1)} · ${escapeHtml(msg.avgLabel)} ${tps.avgTps.toFixed(1)}</div>
+        </div>
+        <div class="tp-card">
+          <div class="tp-kpi-label">${escapeHtml(msg.liveCostLabel)}</div>
+          <div class="tp-kpi-value tp-kpi-cost">${formatUsd(tokens.costUsd)}</div>
+          <div class="tp-kpi-meta">${escapeHtml(msg.todayCostLabel)}: ${formatUsd(todayCost)}</div>
+          <div class="tp-kpi-meta">${escapeHtml(msg.activeTokensLabel)}: ${formatTokens(tokens.total)}</div>
+        </div>
       </div>
       <div class="tp-card">
-        <div class="tp-kpi-label">${escapeHtml(msg.liveCostLabel)}</div>
-        <div class="tp-kpi-value tp-kpi-cost">${formatUsd(tokens.costUsd)}</div>
-        <div class="tp-kpi-meta">${escapeHtml(msg.todayCostLabel)}: ${formatUsd(todayCost)}</div>
-        <div class="tp-kpi-meta">${escapeHtml(msg.activeTokensLabel)}: ${formatTokens(tokens.total)}</div>
+        <div class="tp-row-between">
+          <span class="tp-kpi-label">${escapeHtml(msg.activeTokensLabel)}</span>
+          <span class="tp-mono-stat">${formatTokens(tokens.total)} tok</span>
+        </div>
+        ${renderTricolorBar(tokens, msg, true)}
       </div>
-    </div>
-    <div class="tp-card">
-      <div class="tp-row-between">
-        <span class="tp-kpi-label">${escapeHtml(msg.activeTokensLabel)}</span>
-        <span class="tp-mono-stat">${formatTokens(tokens.total)} tok</span>
-      </div>
-      ${renderTricolorBar(tokens, msg, true)}
     </div>
   `
 
