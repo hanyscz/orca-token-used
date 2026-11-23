@@ -4056,6 +4056,15 @@ test('renderDashboardShellHtml renders shared session race track only for active
   assert.ok(html.includes('class="tp-racer-avatar"'))
   assert.ok(!html.includes('<script>alert(1)</script>'))
 
+  // When working agents are all at 0 tok/s (thinking), do not crown a 0 tok/s leader
+  snap.live.agents = [makeAgent('antigravity:s1', 'working', 'Thinking session', 0)]
+  const thinkingHtml = renderDashboardShellHtml({ snap, tab: 'live', scope: 'all', locale: 'en', nowMs: now })
+  assert.ok(thinkingHtml.includes('💭 1 thinking'))
+  assert.ok(!thinkingHtml.includes('tp-race-crown'))
+  assert.ok(!thinkingHtml.includes('tp-view-sub'))
+  assert.ok(!thinkingHtml.includes('tp-section-hint'))
+  assert.equal((thinkingHtml.match(/ACTIVE TOKENS/g) ?? []).length, 1)
+
   // When all sessions are done, race track should not render
   snap.live.agents = [makeAgent('antigravity:s3', 'done', 'Finished session', 0)]
   const idleHtml = renderDashboardShellHtml({ snap, tab: 'live', scope: 'all', locale: 'en', nowMs: now })

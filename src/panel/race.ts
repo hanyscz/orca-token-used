@@ -297,15 +297,18 @@ export function renderSessionRaceTrackHtml(
 
   const maxRate = Math.max(...activeRacers.map((r) => r.liveOutRate), 60)
   const workingRacers = activeRacers.filter((r) => r.state === 'working')
+  const sprintingRacers = workingRacers.filter((r) => r.liveOutRate > 0)
   const leader =
-    workingRacers.length > 0
-      ? [...workingRacers].sort((a, b) => b.liveOutRate - a.liveOutRate || b.tokens.total - a.tokens.total)[0]
+    sprintingRacers.length > 0
+      ? [...sprintingRacers].sort((a, b) => b.liveOutRate - a.liveOutRate || b.tokens.total - a.tokens.total)[0]
       : null
-  const anyMoving = activeRacers.some((r) => r.state === 'working' && r.liveOutRate > 0)
+  const anyMoving = sprintingRacers.length > 0
 
   const leaderHtml = leader
     ? `<span class="tp-race-leader" title="${escapeRaceHtml(leader.title)}">👑 ${escapeRaceHtml(truncateRaceLabel(leader.title, 16))} · ${escapeRaceHtml(formatRate(leader.liveOutRate))}</span>`
-    : `<span class="tp-race-leader tp-race-leader-idle">${activeRacers.length} waiting</span>`
+    : workingRacers.length > 0
+      ? `<span class="tp-race-leader tp-race-leader-idle">💭 ${workingRacers.length} thinking</span>`
+      : `<span class="tp-race-leader tp-race-leader-idle">✋ ${activeRacers.length} waiting</span>`
 
   const runnersHtml = activeRacers
     .map((racer, idx) => {

@@ -336,6 +336,14 @@ body {
   gap: 8px;
 }
 
+.tp-live-token-bar {
+  padding: 0 2px;
+}
+
+.tp-live-token-bar .tp-bar-track {
+  margin-top: 0;
+}
+
 /* Shared Single-Track Runtime Session Race */
 .tp-race-card {
   background: var(--tp-card);

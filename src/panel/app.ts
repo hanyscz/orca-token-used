@@ -588,11 +588,7 @@ function renderLiveView(
           <div class="tp-kpi-meta">${escapeHtml(msg.activeTokensLabel)}: ${formatTokens(tokens.total)}</div>
         </div>
       </div>
-      <div class="tp-card">
-        <div class="tp-row-between">
-          <span class="tp-kpi-label">${escapeHtml(msg.activeTokensLabel)}</span>
-          <span class="tp-mono-stat">${formatTokens(tokens.total)} tok</span>
-        </div>
+      <div class="tp-live-token-bar">
         ${renderTricolorBar(tokens, msg, true)}
       </div>
       ${raceTrackHtml}
@@ -753,7 +749,6 @@ function renderLiveView(
     ${kpiHtml}
     <div class="tp-section-hdr">
       <span>${escapeHtml(msg.runningAgentsHeader)} (${rootCount})</span>
-      ${rootCount > 0 ? `<span class="tp-section-hint">${escapeHtml(msg.clickToInspectHint)}</span>` : ''}
     </div>
     ${cardsHtml}
   `
@@ -1445,7 +1440,7 @@ export function renderDashboardShellHtml(params: {
     <div class="tp-subheader">
       <div class="tp-view-heading">
         <div class="tp-view-name">${escapeHtml(msg.tabs[tab])}</div>
-        <div class="tp-view-sub">${escapeHtml(msg.tabSubtitles[tab])}</div>
+        ${tab === 'live' ? '' : `<div class="tp-view-sub">${escapeHtml(msg.tabSubtitles[tab])}</div>`}
       </div>
       ${rightControlHtml}
     </div>
