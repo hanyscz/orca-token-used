@@ -26,6 +26,10 @@ export interface UiMessages {
   outputShort: string
   costShort: string
   runningAgentsHeader: string
+  liveRaceLabel: string
+  raceThinking: (count: number) => string
+  raceWaiting: (count: number) => string
+  raceSubagentsShort: (count: number) => string
   subagentsHeader: string
   reasoningLabel: string
   reasoningNotRecorded: string
@@ -134,6 +138,10 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     outputShort: '輸出',
     costShort: '費用',
     runningAgentsHeader: '執行與待命中的 Agent',
+    liveRaceLabel: '即時競速',
+    raceThinking: (count) => `${count} 思考中`,
+    raceWaiting: (count) => `${count} 等待中`,
+    raceSubagentsShort: (count) => `${count} 子任務`,
     subagentsHeader: 'Subagent 工作階段',
     reasoningLabel: '推理等級',
     reasoningNotRecorded: '—',
@@ -250,6 +258,10 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     outputShort: '输出',
     costShort: '费用',
     runningAgentsHeader: '运行与待命中的 Agent',
+    liveRaceLabel: '实时竞速',
+    raceThinking: (count) => `${count} 思考中`,
+    raceWaiting: (count) => `${count} 等待中`,
+    raceSubagentsShort: (count) => `${count} 子任务`,
     subagentsHeader: 'Subagent 会话',
     reasoningLabel: '推理等级',
     reasoningNotRecorded: '—',
@@ -366,6 +378,10 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     outputShort: 'Out',
     costShort: 'Cost',
     runningAgentsHeader: 'ACTIVE & RECENT AGENTS',
+    liveRaceLabel: 'LIVE RACE',
+    raceThinking: (count) => `${count} thinking`,
+    raceWaiting: (count) => `${count} waiting`,
+    raceSubagentsShort: (count) => `${count} sub`,
     subagentsHeader: 'SUBAGENT SESSIONS',
     reasoningLabel: 'REASONING',
     reasoningNotRecorded: '—',
@@ -482,6 +498,10 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     outputShort: '出力',
     costShort: '費用',
     runningAgentsHeader: '稼働中・待機中のエージェント',
+    liveRaceLabel: 'ライブレース',
+    raceThinking: (count) => `${count} 思考中`,
+    raceWaiting: (count) => `${count} 待機中`,
+    raceSubagentsShort: (count) => `サブ ${count}`,
     subagentsHeader: 'サブエージェント セッション',
     reasoningLabel: '推論レベル',
     reasoningNotRecorded: '—',
@@ -598,6 +618,10 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     outputShort: '출력',
     costShort: '비용',
     runningAgentsHeader: '실행 및 대기 중인 에이전트',
+    liveRaceLabel: '실시간 레이스',
+    raceThinking: (count) => `${count} 생각 중`,
+    raceWaiting: (count) => `${count} 대기 중`,
+    raceSubagentsShort: (count) => `서브 ${count}`,
     subagentsHeader: '서브에이전트 세션',
     reasoningLabel: '추론 레벨',
     reasoningNotRecorded: '—',
@@ -714,6 +738,10 @@ const MESSAGES: Record<SupportedLocale, UiMessages> = {
     outputShort: 'Výstup',
     costShort: 'Cena',
     runningAgentsHeader: 'AKTIVNÍ A NEDÁVNÍ AGENTI',
+    liveRaceLabel: 'ŽIVÝ ZÁVOD',
+    raceThinking: (count) => `${count} přemýšlí`,
+    raceWaiting: (count) => `${count} čeká`,
+    raceSubagentsShort: (count) => `${count} sub`,
     subagentsHeader: 'RELACE SUBAGENTŮ',
     reasoningLabel: 'ÚROVEŇ ODVOZOVÁNÍ',
     reasoningNotRecorded: '—',

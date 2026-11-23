@@ -4303,3 +4303,115 @@ test('Live Race groups parent + active subagents into family duckling squad trai
   assert.ok(html.includes('tp-racer-avatar-sub'))
   assert.ok(html.includes('(+4)'))
 })
+
+test('all 6 locales (including cs) have complete i18n keys, localized Live Race labels, and wrapped quota account rows', () => {
+  const locales = ['zh-TW', 'zh-CN', 'en', 'ja', 'ko', 'cs'] as const
+  const enKeys = Object.keys(getMessages('en')).sort()
+  for (const loc of locales) {
+    const msg = getMessages(loc)
+    assert.deepEqual(Object.keys(msg).sort(), enKeys, `locale ${loc} key mismatch`)
+    assert.ok(msg.liveRaceLabel.length > 0, `locale ${loc} missing liveRaceLabel`)
+    assert.ok(msg.navShort.stats.length > 0, `locale ${loc} missing navShort.stats`)
+    assert.ok(msg.breakdownModes.model.length > 0, `locale ${loc} missing breakdownModes.model`)
+    assert.ok(msg.breakdownModes.project.length > 0, `locale ${loc} missing breakdownModes.project`)
+    assert.ok(msg.raceThinking(2).includes('2'), `locale ${loc} raceThinking`)
+    assert.ok(msg.raceWaiting(3).includes('3'), `locale ${loc} raceWaiting`)
+    assert.ok(msg.raceSubagentsShort(2).includes('2'), `locale ${loc} raceSubagentsShort`)
+  }
+
+  const now = Date.now()
+  const snap = createQuotaTestSnapshot(
+    {
+      source: 'live',
+      syncedAt: now,
+      refreshing: false,
+      lastError: null,
+      providers: [
+        createProviderSnapshot('antigravity', {
+          label: 'Antigravity',
+          accounts: [
+            {
+              id: 'acc-1',
+              email: 'alice@example.com',
+              label: null,
+              authKind: 'oauth',
+              active: true,
+              status: 'ok',
+              error: null,
+              session: null,
+              weekly: null,
+              pools: [
+                {
+                  id: 'gemini',
+                  label: 'Gemini Models',
+                  session: { usedPercent: 38, windowMinutes: 300, resetsAt: null, resetDescription: null },
+                  weekly: { usedPercent: 17, windowMinutes: 10080, resetsAt: null, resetDescription: null }
+                },
+                {
+                  id: 'claude-gpt',
+                  label: 'Claude and GPT models',
+                  session: null,
+                  weekly: { usedPercent: 100, windowMinutes: 10080, resetsAt: null, resetDescription: null }
+                }
+              ]
+            },
+            {
+              id: 'acc-2',
+              email: 'bob@example.com',
+              label: null,
+              authKind: 'oauth',
+              active: false,
+              status: 'ok',
+              error: null,
+              session: null,
+              weekly: null,
+              pools: []
+            }
+          ]
+        })
+      ]
+    },
+    now
+  )
+
+  const csHtml = renderDashboardShellHtml({
+    snap,
+    tab: 'quotas',
+    scope: 'all',
+    locale: 'cs',
+    collapsedGroups: { 'quotas:accounts:antigravity': false },
+    nowMs: now
+  })
+  assert.ok(csHtml.includes('class="tp-quota-account-hdr"'))
+  assert.ok(csHtml.includes('class="tp-quota-account-summary"'))
+  assert.ok(csHtml.includes('alice@example.com'))
+  assert.ok(csHtml.includes('Neuplatňuje se'))
+  assert.ok(!csHtml.includes('flex-shrink:0" title="Gemini Models'))
+
+  snap.live.agents = [
+    {
+      id: 'agy:cs-1',
+      sessionKey: 'agy:cs-1',
+      title: 'Czech test',
+      agent: 'antigravity',
+      state: 'working',
+      terminalId: null,
+      providerLabel: 'Google',
+      modelLabel: 'gemini-4-neon',
+      projectName: 'proj',
+      workspaceName: 'main',
+      workspacePath: '/tmp/proj',
+      updatedAt: now,
+      liveOutRate: 0,
+      liveInRate: 0,
+      tokens: { input: 100, output: 50, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 150, costUsd: 0 },
+      tps: { avgTps: 0, peakTps: 0, liveTps: 0 },
+      sparkline: [0],
+      outSeries: [0],
+      inSeries: [0]
+    }
+  ]
+  const csLiveHtml = renderDashboardShellHtml({ snap, tab: 'live', scope: 'all', locale: 'cs', nowMs: now })
+  assert.ok(csLiveHtml.includes('ŽIVÝ ZÁVOD'))
+  assert.ok(csLiveHtml.includes('1 přemýšlí'))
+})

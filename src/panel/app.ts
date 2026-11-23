@@ -572,7 +572,7 @@ function renderLiveView(
   const todayCost = snap.periods.all.day.tokens.costUsd
 
   const { squads, mascotByKey } = buildActiveRaceSquads(agents, subagents)
-  const raceTrackHtml = renderSessionRaceTrackHtml(squads, mascotByKey, formatRateTokPerSec)
+  const raceTrackHtml = renderSessionRaceTrackHtml(squads, mascotByKey, formatRateTokPerSec, msg)
 
   const kpiHtml = `
     <div class="tp-live-kpi-sticky">
@@ -1285,10 +1285,11 @@ function renderQuotaProviderCard(
         const summary = formatAccountMiniSummary(acc, msg)
         return `
           <div class="tp-quota-account-row">
-            <span class="tp-quota-account-email" title="${escapeHtml(name)}">
-              ${escapeHtml(name)}${acc.active ? ` · <strong style="color:var(--tp-quota-ok)">${escapeHtml(msg.quotaActiveAccountBadge)}</strong>` : ''}
-            </span>
-            <span style="color:var(--tp-muted);flex-shrink:0" title="${escapeHtml(summary)}">${escapeHtml(summary)}</span>
+            <div class="tp-quota-account-hdr">
+              <span class="tp-quota-account-email" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+              ${acc.active ? `<span class="tp-quota-account-active">${escapeHtml(msg.quotaActiveAccountBadge)}</span>` : ''}
+            </div>
+            <div class="tp-quota-account-summary" title="${escapeHtml(summary)}">${escapeHtml(summary)}</div>
           </div>
         `
       })

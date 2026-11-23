@@ -1,4 +1,5 @@
 import type { LiveAgentCard } from '../protocol'
+import type { UiMessages } from './i18n'
 
 export type MascotSpecies =
   | 'shiba'
@@ -404,7 +405,8 @@ export function buildActiveRaceSquads(
 export function renderSessionRaceTrackHtml(
   squads: RaceSquad[],
   mascotByKey: Map<string, SessionMascot>,
-  formatRate: (rate: number) => string
+  formatRate: (rate: number) => string,
+  msg: UiMessages
 ): string {
   if (squads.length === 0) return ''
 
@@ -430,12 +432,12 @@ export function renderSessionRaceTrackHtml(
   const leaderHtml = leader
     ? `<span class="tp-race-leader" title="${escapeRaceHtml(leader.lead.title)}">👑 ${escapeRaceHtml(truncateRaceLabel(leader.lead.title, 15))}${leaderSuffix} · ${escapeRaceHtml(formatRate(leader.totalRate))}</span>`
     : workingSquads.length > 0
-      ? `<span class="tp-race-leader tp-race-leader-idle">💭 ${workingSquads.length} thinking</span>`
-      : `<span class="tp-race-leader tp-race-leader-idle">✋ ${squads.length} waiting</span>`
+      ? `<span class="tp-race-leader tp-race-leader-idle">💭 ${escapeRaceHtml(msg.raceThinking(workingSquads.length))}</span>`
+      : `<span class="tp-race-leader tp-race-leader-idle">✋ ${escapeRaceHtml(msg.raceWaiting(squads.length))}</span>`
 
   const trackTitle = hasAnySubagents
-    ? `🏁 LIVE RACE · ${squads.length} (${totalActiveCount})`
-    : `🏁 LIVE RACE · ${squads.length}`
+    ? `🏁 ${escapeRaceHtml(msg.liveRaceLabel)} · ${squads.length} (${totalActiveCount})`
+    : `🏁 ${escapeRaceHtml(msg.liveRaceLabel)} · ${squads.length}`
 
   const runnersHtml = squads
     .map((sq, idx) => {
@@ -471,12 +473,12 @@ export function renderSessionRaceTrackHtml(
 
       const subSummary =
         sq.subagents.length > 0
-          ? ` (${sq.subagents.length} sub: ${sq.subagents
+          ? ` (${msg.raceSubagentsShort(sq.subagents.length)}: ${sq.subagents
               .slice(0, 2)
               .map((c) => `${truncateRaceLabel(c.title, 12)} ${formatRate(c.liveOutRate)}`)
               .join(', ')}${sq.subagents.length > 2 ? ', …' : ''})`
           : ''
-      const ratePart = isWorking ? formatRate(sq.totalRate) : sq.lead.state
+      const ratePart = isWorking ? formatRate(sq.totalRate) : msg.states[sq.lead.state]
       const tipText = `${truncateRaceLabel(sq.lead.title, 18)} · ${ratePart}${subSummary}`
       const tipAlignCls = pct <= 22 ? ' tp-race-tip-left' : pct >= 78 ? ' tp-race-tip-right' : ''
 

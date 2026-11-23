@@ -484,7 +484,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
       .join(' | ')
     const tooltipLines = [`${msg.appTitle} — ${msg.tabs.day}: ${tokStr} tok · ${costStr}`]
     if (activeModels) tooltipLines.push(activeModels)
-    if (quotaInfo.summaryParts.length > 0) tooltipLines.push(`Quotas: ${quotaInfo.summaryParts.join(' · ')}`)
+    if (quotaInfo.summaryParts.length > 0) tooltipLines.push(`${msg.navShort.quotas}: ${quotaInfo.summaryParts.join(' · ')}`)
     const tooltip = tooltipLines.join('\n')
 
     const budgetExceeded = dailyBudgetUsd > 0 && dayTokens.costUsd >= dailyBudgetUsd

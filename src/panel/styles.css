@@ -1871,15 +1871,23 @@ html.light .tp-cost-pill {
 
 .tp-quota-account-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  padding: 5px 8px;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
   border-radius: 6px;
   background: var(--tp-quota-tile);
   border: 1px solid var(--tp-border);
   font-size: 10.5px;
   font-family: var(--tp-font-mono);
+  min-width: 0;
+}
+
+.tp-quota-account-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
 }
 
 .tp-quota-account-email {
@@ -1888,4 +1896,17 @@ html.light .tp-cost-pill {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--tp-fg);
+}
+
+.tp-quota-account-active {
+  flex-shrink: 0;
+  font-weight: 700;
+  color: var(--tp-quota-ok);
+}
+
+.tp-quota-account-summary {
+  color: var(--tp-muted);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
