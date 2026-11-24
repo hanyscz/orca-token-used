@@ -4,7 +4,7 @@
   "execution": "trusted-worker",
   "id": "token-pulse",
   "name": "Token Pulse",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Real-time token usage, generation TPS, live model cost, and 5h/weekly quota gauges across Claude Code, Codex, Gemini, and Antigravity. Reads local agent transcripts and Orca metadata; sends only public pricing requests.",
   "author": {
     "name": "Wilson Liu",
@@ -108,28 +108,28 @@
       {
         "key": "enableClaude",
         "title": "Track Claude Code",
-        "description": "Track Claude Code. When off, its transcripts and settings are not read, its sessions are removed from the plugin's history cache, its rows from Orca's session history list are discarded, and its quota card is hidden. Orca's account list is still run for the remaining quota providers (one call returns all of them); Claude Code's part of the response is discarded and not cached, and the call is skipped when every quota provider is off.",
+        "description": "When off, stops reading Claude Code transcripts and settings, clears its cached sessions, and hides it from the UI and Quotas. Shared Orca account list calls discard Claude Code data and are skipped once all quota providers are off.",
         "type": "boolean",
         "default": true
       },
       {
         "key": "enableCodex",
         "title": "Track Codex",
-        "description": "Track Codex. When off, its transcripts and settings are not read, its sessions are removed from the plugin's history cache, its rows from Orca's session history list are discarded, and its quota card is hidden. Orca's account list is still run for the remaining quota providers (one call returns all of them); Codex's part of the response is discarded and not cached, and the call is skipped when every quota provider is off.",
+        "description": "When off, stops reading Codex transcripts and settings, clears its cached sessions, and hides it from the UI and Quotas. Shared Orca account list calls discard Codex data and are skipped once all quota providers are off.",
         "type": "boolean",
         "default": true
       },
       {
         "key": "enableAntigravity",
         "title": "Track Antigravity",
-        "description": "Track Antigravity. When off, its transcripts and settings are not read, its sessions are removed from the plugin's history cache, its rows from Orca's session history list are discarded, and its quota card is hidden. Orca's account list is still run for the remaining quota providers (one call returns all of them); Antigravity's part of the response is discarded and not cached, and the call is skipped when every quota provider is off.",
+        "description": "When off, stops reading Antigravity transcripts and settings, clears its cached sessions, and hides it from the UI and Quotas. Shared Orca account list calls discard Antigravity data and are skipped once all quota providers are off.",
         "type": "boolean",
         "default": true
       },
       {
         "key": "enableGemini",
         "title": "Track Gemini CLI",
-        "description": "Track Gemini CLI. When off, its transcripts and settings are not read, its sessions are removed from the plugin's history cache, its rows from Orca's session history list are discarded, and its quota card is hidden.",
+        "description": "When off, stops reading Gemini CLI transcripts and settings, clears its cached sessions, and hides it from the UI.",
         "type": "boolean",
         "default": true
       }
