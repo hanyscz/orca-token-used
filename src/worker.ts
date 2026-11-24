@@ -84,6 +84,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
   let historyRows = new Map<string, HistoryRow>()
   let historyRequest: AbortController | null = null
   let lastHistoryRequestMs = 0
+  let historyDone: Promise<void> = Promise.resolve()
 
   const runtime: WorkspaceRuntimeContext = {
     focusedId: null,
@@ -333,13 +334,13 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     runtime.liveAgents = [...next.values()].filter((a) => !isLiveAgentDisabled(a))
   }
 
-  function refreshHistory(force = false): void {
+  function refreshHistory(force = false): Promise<void> {
     const now = Date.now()
-    if (stopped || historyRequest || (!force && now - lastHistoryRequestMs < 30_000)) return
+    if (stopped || historyRequest || (!force && now - lastHistoryRequestMs < 30_000)) return historyDone
     if (!orca.host.has('agent.listSessions') || ALL_AGENTS.every((a) => disabledAgents.has(a))) {
       // Nothing to look up when every agent is switched off.
       historyRows.clear()
-      return
+      return historyDone
     }
     lastHistoryRequestMs = now
     const request = new AbortController()
@@ -358,7 +359,7 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
         b.updatedAt - a.updatedAt
       ).slice(0, 400))
     }
-    void (async () => {
+    historyDone = (async () => {
       try {
         const global = await orca.host.call('agent.listSessions', { limit: 200 }, { signal: request.signal })
         if (stopped || request.signal.aborted) return
@@ -382,9 +383,10 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
         orca.log(`agent.listSessions failed: ${err instanceof Error ? err.message : String(err)}`)
       } finally {
         clearTimeout(timeout)
-        historyRequest = null
+        if (historyRequest === request) historyRequest = null
       }
     })()
+    return historyDone
   }
 
   function getSessionIndex(local = scanner.getJournalIndex()): JournalIndex {
@@ -429,19 +431,24 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     }
   }
 
-  async function persistQuotaCache(): Promise<void> {
-    if (stopped) return
-    try {
-      if (!quotas.hasActiveProviders()) {
-        // Every quota provider is off: no quota data (accounts, e-mails) may stay on disk.
-        await orca.storage.delete(QUOTAS_STORAGE_KEY)
-        return
+  let quotaPersistChain: Promise<void> = Promise.resolve()
+  function persistQuotaCache(): Promise<void> {
+    const write = quotaPersistChain.then(async () => {
+      if (stopped) return
+      try {
+        const cached = quotas.hasActiveProviders() ? quotas.toStorableCache() : null
+        if (cached) {
+          await orca.storage.set(QUOTAS_STORAGE_KEY, cached as unknown as import('orca/worker').JsonValue)
+        } else {
+          // Every quota provider is off: no quota data (accounts, e-mails) may stay on disk.
+          await orca.storage.delete(QUOTAS_STORAGE_KEY)
+        }
+      } catch {
+        // Ignore storage write error
       }
-      const cached = quotas.toStorableCache()
-      if (cached) await orca.storage.set(QUOTAS_STORAGE_KEY, cached as unknown as import('orca/worker').JsonValue)
-    } catch {
-      // Ignore storage write error
-    }
+    })
+    quotaPersistChain = write
+    return write
   }
 
   async function refreshQuotasAndPersist(force = false): Promise<QuotasSnapshot> {
@@ -617,6 +624,8 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     }, 60_000)
   }
 
+  await loadSettings()
+
   let hadQuotaCache = false
   try {
     const [cachedPricing, cachedHist, cachedQuotas, savedLocale] = await Promise.all([
@@ -636,8 +645,6 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
     // Proceed cleanly on cold start
   }
 
-  await loadSettings()
-  // The cache was read before the settings: rewrite it without the providers that are switched off.
   if (hadQuotaCache && disabledAgents.size > 0) await persistQuotaCache()
 
   // Register Panel RPC handlers
@@ -850,7 +857,10 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
 
   disposables.push(
     orca.settings.onDidChange(async () => {
+      const wasDisabled = disabledAgents
       await loadSettings()
+      if (stopped) return
+      const reenabled = [...wasDisabled].some((a) => !disabledAgents.has(a))
       runtime.liveAgents = runtime.liveAgents.filter((a) => !isLiveAgentDisabled(a))
       historyRows = new Map(
         [...historyRows].filter(([, row]) => {
@@ -860,10 +870,19 @@ export default async function activate(orca: OrcaWorkerApi): Promise<void> {
       )
       // Drop cached quota data of providers that were just switched off.
       void persistQuotaCache()
+      if ([...disabledAgents].some((a) => !wasDisabled.has(a))) void flushHistoricalCache(true)
       scheduleTimers()
-      if (!stopped) void computeAndPublish(true)
+      if (reenabled) {
+        historyRequest?.abort()
+        historyRequest = null
+        void computeAndPublish(true).then(() => historyDone).then(() => {
+          if (!stopped) void computeAndPublish(false)
+        })
+      } else {
+        void computeAndPublish(true)
+      }
       // A provider switched back on needs fresh data (the quota call is skipped while all are off).
-      if (quotas.needsRefresh()) {
+      if (!stopped && quotas.needsRefresh()) {
         void refreshQuotasAndPersist(false).then(() => {
           if (!stopped) void computeAndPublish(false)
         })

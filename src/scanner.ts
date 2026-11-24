@@ -433,6 +433,10 @@ export class TranscriptScanner {
     const seenHydratedInodes = new Set<string>()
     for (const [rawFilePath, item] of Object.entries(items)) {
       if (!item || typeof item !== 'object' || item.updatedAtMs < cutoffMs) continue
+      if (this.disabledAgents.has(item.agent)) {
+        this.dirtyHistoricalCache = true
+        continue
+      }
       let filePath = rawFilePath
       const inodeKey = canonicalInodeOrRealpath(rawFilePath)
       if (inodeKey) {
@@ -757,6 +761,12 @@ export class TranscriptScanner {
     const same = next.size === this.disabledAgents.size && [...next].every((a) => this.disabledAgents.has(a))
     if (same) return
     this.disabledAgents = next
+    for (const [filePath, st] of this.statesByFile) {
+      if (!next.has(st.agent)) continue
+      this.statesByFile.delete(filePath)
+      this.subagentMetaByFile.delete(filePath)
+      this.dirtyHistoricalCache = true
+    }
     this.lastJournalRefreshMs = 0
     // Force a fresh discovery so re-enabled agents are picked up immediately.
     this.cachedDiscovered = []
@@ -940,8 +950,6 @@ export class TranscriptScanner {
 
     if (doFullWalk) {
       for (const [filePath, st] of this.statesByFile) {
-        // Sessions of a switched-off agent are kept (they feed the historical cache) but not reported.
-        if (this.disabledAgents.has(st.agent)) continue
         if (!activePaths.has(filePath)) {
           this.statesByFile.delete(filePath)
           this.subagentMetaByFile.delete(filePath)

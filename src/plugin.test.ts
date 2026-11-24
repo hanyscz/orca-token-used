@@ -9,7 +9,8 @@ import {
   compute60sIoSeries,
   isSameOrChildWorktreePath,
   pollSingleLiveAgent,
-  resolveSessionRunState
+  resolveSessionRunState,
+  withoutDisabledLiveAgents
 } from './aggregator'
 import {
   cleanConversationTitle,
@@ -4414,4 +4415,72 @@ test('all 6 locales (including cs) have complete i18n keys, localized Live Race 
   const csLiveHtml = renderDashboardShellHtml({ snap, tab: 'live', scope: 'all', locale: 'cs', nowMs: now })
   assert.ok(csLiveHtml.includes('ŽIVÝ ZÁVOD'))
   assert.ok(csLiveHtml.includes('1 přemýšlí'))
+})
+
+describe('Per-agent tracking switches: aggregator', () => {
+  const now = Date.now()
+  const workspace = {
+    focusedId: null,
+    focusedProject: null,
+    focusedName: null,
+    focusedBranch: null,
+    focusedPath: null
+  }
+
+  function sessionWithTurn(id: string, agent: 'claude' | 'codex') {
+    const st = createEmptySessionState(id, agent, `/tmp/${id}.jsonl`)
+    st.updatedAtMs = now - 5_000
+    st.lastMtimeMs = now - 5_000
+    st.turnsByKey.set('t1', {
+      turnKey: 't1',
+      timestampMs: now - 5_000,
+      input: 1000,
+      output: 500,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 1500,
+      durationSec: 5,
+      tps: 100,
+      model: agent === 'claude' ? 'claude-fable-5' : 'gpt-6.1-terra',
+      explicitCostUsd: null
+    })
+    return st
+  }
+
+  const liveAgents = [
+    { terminalId: 'pty-claude', title: 'claude work', agent: 'claude', state: 'working' as const, stateStartedAt: now - 10_000 },
+    { terminalId: 'pty-codex', title: 'codex work', agent: 'codex', state: 'working' as const, stateStartedAt: now - 10_000 }
+  ]
+
+  test('leaves switched-off agents out of the per-agent breakdown and the live roster', () => {
+    const sessions = [sessionWithTurn('s-claude', 'claude'), sessionWithTurn('s-codex', 'codex')]
+    const journal = createTestJournalIndex()
+
+    const all = buildDashboardSnapshot(sessions, journal, new PricingEngine(), { ...workspace, liveAgents }, now)
+    assert.ok(all.periods.all.day.byAgent.some((row) => row.agent === 'codex'))
+    assert.ok(all.live.agents.some((card) => card.title === 'codex work'))
+
+    const filtered = buildDashboardSnapshot(
+      sessions,
+      journal,
+      new PricingEngine(),
+      { ...workspace, liveAgents, disabledAgents: new Set(['codex'] as const) },
+      now
+    )
+    assert.deepEqual(
+      filtered.periods.all.day.byAgent.map((row) => row.agent).sort(),
+      ['antigravity', 'claude', 'gemini']
+    )
+    assert.equal(filtered.live.agents.some((card) => card.title === 'codex work'), false)
+    assert.equal(filtered.live.agents.some((card) => card.title === 'claude work'), true)
+  })
+
+  test('withoutDisabledLiveAgents keeps the runtime untouched when nothing is switched off', () => {
+    const runtime = { ...workspace, liveAgents }
+    assert.equal(withoutDisabledLiveAgents(runtime), runtime)
+    assert.equal(withoutDisabledLiveAgents({ ...runtime, disabledAgents: new Set() }).liveAgents.length, 2)
+    const filtered = withoutDisabledLiveAgents({ ...runtime, disabledAgents: new Set(['claude'] as const) })
+    assert.deepEqual(filtered.liveAgents.map((a) => a.terminalId), ['pty-codex'])
+  })
 })

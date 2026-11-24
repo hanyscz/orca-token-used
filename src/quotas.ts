@@ -34,6 +34,7 @@ interface StoredQuotasCache {
   version: 1
   syncedAt: number
   providers: QuotaProviderSnapshot[]
+  coveredProviders?: QuotaProviderKind[]
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -614,6 +615,8 @@ export class QuotaEngine {
       }
     }
     this.activeControllers.clear()
+    this.inFlight = null
+    this.refreshing = false
   }
 
   loadFromCache(cached: unknown): void {
@@ -652,7 +655,11 @@ export class QuotaEngine {
     }
 
     if (validProviders.length > 0) {
+      const covered = Array.isArray(obj.coveredProviders)
+        ? obj.coveredProviders.filter((p): p is QuotaProviderKind => QUOTA_PROVIDERS.includes(p as QuotaProviderKind))
+        : QUOTA_PROVIDERS
       this.officialProviders = validProviders
+      this.coveredProviders = new Set(covered.filter((p) => !this.disabledProviders.has(p)))
       this.syncedAt = syncedAt
       this.source = 'cache'
     }
@@ -663,6 +670,7 @@ export class QuotaEngine {
     return {
       version: 1,
       syncedAt: this.syncedAt,
+      coveredProviders: [...this.coveredProviders],
       providers: this.officialProviders.map((p) => ({
         ...p,
         local: {
@@ -674,7 +682,8 @@ export class QuotaEngine {
   }
 
   needsRefresh(now = this.nowFn()): boolean {
-    if (this.refreshRequested || !this.syncedAt || !this.officialProviders) return true
+    if (!this.syncedAt || !this.officialProviders) return true
+    if (this.activeProviders().some((p) => !this.coveredProviders.has(p))) return true
     return now - this.syncedAt >= this.ttlMs
   }
 
@@ -708,7 +717,7 @@ export class QuotaEngine {
         const providers = parseOrcaAccountListPayload(raw).filter((p) => !this.disabledProviders.has(p.provider))
         if (!controller.signal.aborted) {
           this.officialProviders = providers
-          this.refreshRequested = false
+          this.coveredProviders = new Set(this.activeProviders())
           this.syncedAt = now ?? this.nowFn()
           this.source = 'live'
           this.lastError = null
@@ -720,9 +729,9 @@ export class QuotaEngine {
         }
       } finally {
         this.activeControllers.delete(controller)
-        this.refreshing = false
         if (this.inFlight === run) {
           this.inFlight = null
+          this.refreshing = false
         }
       }
       return this.getSnapshot(sessions, pricing, now ?? this.nowFn())
@@ -733,21 +742,28 @@ export class QuotaEngine {
   }
 
   private disabledProviders = new Set<QuotaProviderKind>()
-  /** Set when a provider was switched back on and has no data yet; cleared by a successful refresh. */
-  private refreshRequested = false
+  private coveredProviders = new Set<QuotaProviderKind>()
 
   /** Providers switched off in the plugin settings are left out of every snapshot. */
   setDisabledProviders(providers: Iterable<QuotaProviderKind>): void {
     const next = new Set(providers)
-    const reenabled = Array.from(this.disabledProviders).some((p) => !next.has(p))
+    const newlyDisabled = [...next].some((p) => !this.disabledProviders.has(p))
     this.disabledProviders = next
+    if (newlyDisabled && this.inFlight) this.abortInFlight()
     // Forget what was fetched for providers that are now off (so it is not cached either).
+    for (const p of next) this.coveredProviders.delete(p)
     if (this.officialProviders) {
-      this.officialProviders = this.officialProviders.filter((p) => !next.has(p.provider))
+      const remaining = this.officialProviders.filter((p) => !next.has(p.provider))
+      if (remaining.length > 0 || this.officialProviders.length === 0) {
+        this.officialProviders = remaining
+      } else {
+        this.officialProviders = null
+        this.coveredProviders.clear()
+        this.syncedAt = null
+        this.lastError = null
+        this.source = 'loading'
+      }
     }
-    // A provider switched back on has no data yet: request a refresh without touching `syncedAt`,
-    // so the (filtered) cache can still be written while that refresh is pending or fails.
-    if (reenabled) this.refreshRequested = true
   }
 
   /** False when every quota provider is switched off (nothing is fetched, shown or cached). */

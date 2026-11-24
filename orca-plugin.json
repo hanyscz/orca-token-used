@@ -108,28 +108,28 @@
       {
         "key": "enableClaude",
         "title": "Track Claude Code",
-        "description": "Track Claude Code. When off, its transcripts and settings are not read, its rows from Orca's session history list are discarded, and its quota card is hidden. Orca's account list is still run for the remaining quota providers (one call returns all of them); Claude Code's part of the response is discarded and not cached, and the call is skipped when every quota provider is off.",
+        "description": "Track Claude Code. When off, its transcripts and settings are not read, its sessions are removed from the plugin's history cache, its rows from Orca's session history list are discarded, and its quota card is hidden. Orca's account list is still run for the remaining quota providers (one call returns all of them); Claude Code's part of the response is discarded and not cached, and the call is skipped when every quota provider is off.",
         "type": "boolean",
         "default": true
       },
       {
         "key": "enableCodex",
         "title": "Track Codex",
-        "description": "Track Codex. When off, its transcripts and settings are not read, its rows from Orca's session history list are discarded, and its quota card is hidden. Orca's account list is still run for the remaining quota providers (one call returns all of them); Codex's part of the response is discarded and not cached, and the call is skipped when every quota provider is off.",
+        "description": "Track Codex. When off, its transcripts and settings are not read, its sessions are removed from the plugin's history cache, its rows from Orca's session history list are discarded, and its quota card is hidden. Orca's account list is still run for the remaining quota providers (one call returns all of them); Codex's part of the response is discarded and not cached, and the call is skipped when every quota provider is off.",
         "type": "boolean",
         "default": true
       },
       {
         "key": "enableAntigravity",
         "title": "Track Antigravity",
-        "description": "Track Antigravity. When off, its transcripts and settings are not read, its rows from Orca's session history list are discarded, and its quota card is hidden. Orca's account list is still run for the remaining quota providers (one call returns all of them); Antigravity's part of the response is discarded and not cached, and the call is skipped when every quota provider is off.",
+        "description": "Track Antigravity. When off, its transcripts and settings are not read, its sessions are removed from the plugin's history cache, its rows from Orca's session history list are discarded, and its quota card is hidden. Orca's account list is still run for the remaining quota providers (one call returns all of them); Antigravity's part of the response is discarded and not cached, and the call is skipped when every quota provider is off.",
         "type": "boolean",
         "default": true
       },
       {
         "key": "enableGemini",
         "title": "Track Gemini CLI",
-        "description": "Track Gemini CLI. When off, its transcripts and settings are not read, its rows from Orca's session history list are discarded, and its quota card is hidden.",
+        "description": "Track Gemini CLI. When off, its transcripts and settings are not read, its sessions are removed from the plugin's history cache, its rows from Orca's session history list are discarded, and its quota card is hidden.",
         "type": "boolean",
         "default": true
       }
